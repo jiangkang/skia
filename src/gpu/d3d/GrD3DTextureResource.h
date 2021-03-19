@@ -25,7 +25,7 @@ public:
     GrD3DTextureResource(const GrD3DTextureResourceInfo& info, sk_sp<GrD3DResourceState> state)
             : fInfo(info)
             , fState(std::move(state))
-            , fResource(new Resource(fInfo.fResource)) {
+            , fResource(new Resource(fInfo.fResource, info.fAlloc)) {
         // gr_cp will implicitly ref the ID3D12Resource for us, so we don't need to worry about
         // whether it's borrowed or not
     }
@@ -77,28 +77,6 @@ public:
 protected:
     void releaseResource(GrD3DGpu* gpu);
 
-    void addResourceIdleProc(GrTexture* owningTexture, sk_sp<GrRefCntedCallback> idleProc) {
-        if (fResource) {
-            fResource->addIdleProc(owningTexture, std::move(idleProc));
-        }
-    }
-    void resetResourceIdleProcs() {
-        SkASSERT(fResource);
-        fResource->resetIdleProcs();
-    }
-    bool resourceIsQueuedForWorkOnGpu() const {
-        SkASSERT(fResource);
-        return fResource->isQueuedForWorkOnGpu();
-    }
-    int resourceIdleProcCnt() const {
-        SkASSERT(fResource);
-        return fResource->idleProcCnt();
-    }
-    sk_sp<GrRefCntedCallback> resourceIdleProc(int i) const {
-        SkASSERT(fResource);
-        return fResource->idleProc(i);
-    }
-
     GrD3DTextureResourceInfo fInfo;
     sk_sp<GrD3DResourceState> fState;
 
@@ -106,11 +84,14 @@ private:
     class Resource : public GrTextureResource {
     public:
         explicit Resource()
-            : fResource(nullptr) {
+            : fResource(nullptr)
+            , fAlloc(nullptr) {
         }
 
-        Resource(const gr_cp<ID3D12Resource>& textureResource)
-            : fResource(textureResource) {
+        Resource(const gr_cp<ID3D12Resource>& textureResource,
+                 const sk_sp<GrD3DAlloc>& alloc)
+            : fResource(textureResource)
+            , fAlloc(alloc) {
         }
 
         ~Resource() override {}
@@ -125,6 +106,7 @@ private:
         void freeGPUData() const override;
 
         mutable gr_cp<ID3D12Resource> fResource;
+        mutable sk_sp<GrD3DAlloc> fAlloc;
 
         using INHERITED = GrTextureResource;
     };

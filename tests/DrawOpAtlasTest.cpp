@@ -21,14 +21,14 @@
 #include "include/private/GrTypesPriv.h"
 #include "src/core/SkIPoint16.h"
 #include "src/gpu/GrCaps.h"
-#include "src/gpu/GrContextPriv.h"
 #include "src/gpu/GrDeferredUpload.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrDrawOpAtlas.h"
 #include "src/gpu/GrDrawingManager.h"
 #include "src/gpu/GrMemoryPool.h"
 #include "src/gpu/GrOnFlushResourceProvider.h"
 #include "src/gpu/GrOpFlushState.h"
-#include "src/gpu/GrRenderTargetContext.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/GrTextureProxy.h"
 #include "src/gpu/GrXferProcessor.h"
 #include "src/gpu/ops/GrAtlasTextOp.h"
@@ -195,9 +195,8 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(GrAtlasTextOpPreparation, reporter, ctxInfo) 
 
     auto gpu = context->priv().getGpu();
     auto resourceProvider = context->priv().resourceProvider();
-    auto opMemoryPool = context->priv().opMemoryPool();
 
-    auto rtc = GrRenderTargetContext::Make(
+    auto rtc = GrSurfaceDrawContext::Make(
             context, GrColorType::kRGBA_8888, nullptr, SkBackingFit::kApprox, {32, 32});
 
     SkPaint paint;
@@ -209,7 +208,7 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(GrAtlasTextOpPreparation, reporter, ctxInfo) 
     const char* text = "a";
     SkSimpleMatrixProvider matrixProvider(SkMatrix::I());
 
-    std::unique_ptr<GrDrawOp> op =
+    GrOp::Owner op =
             GrAtlasTextOp::CreateOpTestingOnly(
                     rtc.get(), paint, font, matrixProvider, text, 16, 16);
     if (!op) {
@@ -217,7 +216,9 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(GrAtlasTextOpPreparation, reporter, ctxInfo) 
     }
 
     bool hasMixedSampledCoverage = false;
-    op->finalize(*context->priv().caps(), nullptr, hasMixedSampledCoverage, GrClampType::kAuto);
+    GrAtlasTextOp* atlasTextOp = (GrAtlasTextOp*)op.get();
+    atlasTextOp->finalize(
+            *context->priv().caps(), nullptr, hasMixedSampledCoverage, GrClampType::kAuto);
 
     TestingUploadTarget uploadTarget;
 
@@ -225,10 +226,11 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(GrAtlasTextOpPreparation, reporter, ctxInfo) 
 
     GrSurfaceProxyView surfaceView = rtc->writeSurfaceView();
     GrOpFlushState::OpArgs opArgs(op.get(),
-                                  &surfaceView,
+                                  surfaceView,
                                   nullptr,
                                   GrXferProcessor::DstProxyView(),
-                                  GrXferBarrierFlags::kNone);
+                                  GrXferBarrierFlags::kNone,
+                                  GrLoadOp::kLoad);
 
     // Modify the atlas manager so it can't allocate any pages. This will force a failure
     // in the preparation of the text op
@@ -240,7 +242,6 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(GrAtlasTextOpPreparation, reporter, ctxInfo) 
     flushState.setOpArgs(&opArgs);
     op->prepare(&flushState);
     flushState.setOpArgs(nullptr);
-    opMemoryPool->release(std::move(op));
 }
 
 void test_atlas_config(skiatest::Reporter* reporter, int maxTextureSize, size_t maxBytes,

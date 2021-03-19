@@ -10,10 +10,10 @@
 
 #include "include/core/SkColor.h"
 #include "include/private/GrTypesPriv.h"
-#include "src/gpu/GrColorInfo.h"
+#include "src/gpu/GrPixmap.h"
 #include "src/gpu/GrSwizzle.h"
 
-class GrImageInfo;
+size_t GrNumBlocks(SkImage::CompressionType, SkISize baseDimensions);
 
 // Returns a value that can be used to set rowBytes for a transfer function.
 size_t GrCompressedRowBytes(SkImage::CompressionType, int w);
@@ -36,6 +36,13 @@ void GrFillInCompressedData(SkImage::CompressionType, SkISize dimensions, GrMipm
 bool GrConvertPixels(const GrImageInfo& dstInfo,       void* dst, size_t dstRB,
                      const GrImageInfo& srcInfo, const void* src, size_t srcRB,
                      bool flipY = false);
+
+// Convenience version for src/dst pixmaps.
+inline bool GrConvertPixels(const GrPixmap& dst, const GrPixmap& src, bool flipY = false) {
+    return GrConvertPixels(dst.info(), dst.addr(), dst.rowBytes(),
+                           src.info(), src.addr(), src.rowBytes(),
+                           flipY);
+}
 
 /** Clears the dst image to a constant color. */
 bool GrClearImage(const GrImageInfo& dstInfo, void* dst, size_t dstRB, SkColor4f color);

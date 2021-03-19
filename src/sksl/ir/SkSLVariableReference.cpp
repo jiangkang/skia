@@ -14,59 +14,37 @@
 
 namespace SkSL {
 
-VariableReference::VariableReference(int offset, const Variable& variable, RefKind refKind)
-: INHERITED(offset, kExpressionKind, &variable.type())
-, fVariable(variable)
-, fRefKind(refKind) {
-    if (refKind != kRead_RefKind) {
-        fVariable.fWriteCount++;
-    }
-    if (refKind != kWrite_RefKind) {
-        fVariable.fReadCount++;
+VariableReference::VariableReference(int offset, const Variable* variable, RefKind refKind)
+    : INHERITED(offset, kExpressionKind, &variable->type())
+    , fVariable(variable)
+    , fRefKind(refKind) {
+    SkASSERT(this->variable());
+}
+
+bool VariableReference::hasProperty(Property property) const {
+    switch (property) {
+        case Property::kSideEffects:      return false;
+        case Property::kContainsRTAdjust: return this->variable()->name() == "sk_RTAdjust";
+        default:
+            SkASSERT(false);
+            return false;
     }
 }
 
-VariableReference::~VariableReference() {
-    if (fRefKind != kRead_RefKind) {
-        fVariable.fWriteCount--;
-    }
-    if (fRefKind != kWrite_RefKind) {
-        fVariable.fReadCount--;
-    }
+bool VariableReference::isConstantOrUniform() const {
+    return (this->variable()->modifiers().fFlags & Modifiers::kUniform_Flag) != 0;
+}
+
+String VariableReference::description() const {
+    return this->variable()->name();
 }
 
 void VariableReference::setRefKind(RefKind refKind) {
-    if (fRefKind != kRead_RefKind) {
-        fVariable.fWriteCount--;
-    }
-    if (fRefKind != kWrite_RefKind) {
-        fVariable.fReadCount--;
-    }
-    if (refKind != kRead_RefKind) {
-        fVariable.fWriteCount++;
-    }
-    if (refKind != kWrite_RefKind) {
-        fVariable.fReadCount++;
-    }
     fRefKind = refKind;
 }
 
-std::unique_ptr<Expression> VariableReference::constantPropagate(const IRGenerator& irGenerator,
-                                                                 const DefinitionMap& definitions) {
-    if (fRefKind != kRead_RefKind) {
-        return nullptr;
-    }
-    if ((fVariable.fModifiers.fFlags & Modifiers::kConst_Flag) && fVariable.fInitialValue &&
-        fVariable.fInitialValue->isCompileTimeConstant() &&
-        this->type().typeKind() != Type::TypeKind::kArray) {
-        return fVariable.fInitialValue->clone();
-    }
-    auto exprIter = definitions.find(&fVariable);
-    if (exprIter != definitions.end() && exprIter->second &&
-        (*exprIter->second)->isCompileTimeConstant()) {
-        return (*exprIter->second)->clone();
-    }
-    return nullptr;
+void VariableReference::setVariable(const Variable* variable) {
+    fVariable = variable;
 }
 
 }  // namespace SkSL

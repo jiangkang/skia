@@ -7,8 +7,8 @@
 
 #include "include/core/SkString.h"
 #include "include/gpu/GrContextOptions.h"
+#include "include/private/SkSLString.h"
 #include "src/gpu/GrShaderUtils.h"
-#include "src/sksl/SkSLString.h"
 
 namespace GrShaderUtils {
 
@@ -212,6 +212,17 @@ GrContextOptions::ShaderErrorHandler* DefaultShaderErrorHandler() {
 
     static GrDefaultShaderErrorHandler gHandler;
     return &gHandler;
+}
+
+void PrintShaderBanner(SkSL::ProgramKind programKind) {
+    const char* typeName = "Unknown";
+    switch (programKind) {
+        case SkSL::ProgramKind::kVertex:   typeName = "Vertex";   break;
+        case SkSL::ProgramKind::kGeometry: typeName = "Geometry"; break;
+        case SkSL::ProgramKind::kFragment: typeName = "Fragment"; break;
+        default: break;
+    }
+    SkDebugf("---- %s shader ----------------------------------------------------\n", typeName);
 }
 
 }  // namespace GrShaderUtils

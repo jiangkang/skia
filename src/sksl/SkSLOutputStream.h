@@ -8,8 +8,8 @@
 #ifndef SKSL_OUTPUTSTREAM
 #define SKSL_OUTPUTSTREAM
 
-#include "src/sksl/SkSLDefines.h"
-#include "src/sksl/SkSLString.h"
+#include "include/private/SkSLDefines.h"
+#include "include/private/SkSLString.h"
 
 namespace SkSL {
 
@@ -37,9 +37,9 @@ public:
 
     virtual void write(const void* s, size_t size) = 0;
 
-    void writeString(String s);
+    void writeString(const String& s);
 
-    void printf(const char format[], ...) SKSL_PRINTF_LIKE(2, 3);
+    void printf(const char format[], ...) SK_PRINTF_LIKE(2, 3);
 
     void appendVAList(const char format[], va_list args);
 

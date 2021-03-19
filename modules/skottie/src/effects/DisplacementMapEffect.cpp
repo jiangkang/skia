@@ -38,8 +38,8 @@ namespace  {
 // |selector_matrix| and |selector_offset| are set up to select and scale the x/y displacement
 // in R/G, and the x/y coverage modulation in B/A.
 static constexpr char gDisplacementSkSL[] = R"(
-    in shader child;
-    in shader displ;
+    uniform shader child;
+    uniform shader displ;
 
     uniform half4x4 selector_matrix;
     uniform half4   selector_offset;
@@ -55,9 +55,9 @@ static constexpr char gDisplacementSkSL[] = R"(
 
 static sk_sp<SkRuntimeEffect> displacement_effect_singleton() {
     static const SkRuntimeEffect* effect =
-            std::get<0>(SkRuntimeEffect::Make(SkString(gDisplacementSkSL))).release();
+            SkRuntimeEffect::Make(SkString(gDisplacementSkSL)).effect.release();
     if (0 && !effect) {
-        auto err = std::get<1>(SkRuntimeEffect::Make(SkString(gDisplacementSkSL)));
+        auto err = SkRuntimeEffect::Make(SkString(gDisplacementSkSL)).errorText;
         printf("!!! %s\n", err.c_str());
     }
     SkASSERT(effect);
@@ -189,6 +189,7 @@ private:
         const auto child_tile = SkRect::MakeSize(fChildSize);
         auto child_shader = child_content->makeShader(fChildTileMode,
                                                       fChildTileMode,
+                                                      SkFilterMode::kLinear,
                                                       nullptr,
                                                       &child_tile);
 
@@ -197,6 +198,7 @@ private:
         const auto displ_matrix = this->displacementMatrix();
         auto displ_shader = displ_content->makeShader(displ_mode,
                                                       displ_mode,
+                                                      SkFilterMode::kLinear,
                                                       &displ_matrix,
                                                       &displ_tile);
 

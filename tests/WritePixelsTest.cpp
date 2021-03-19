@@ -5,20 +5,19 @@
  * found in the LICENSE file.
  */
 
+#include "include/core/SkBitmap.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkSurface.h"
+#include "include/gpu/GrBackendSurface.h"
+#include "include/gpu/GrDirectContext.h"
 #include "include/private/SkColorData.h"
 #include "include/private/SkImageInfoPriv.h"
 #include "src/core/SkMathPriv.h"
-#include "tests/Test.h"
-#include "tests/TestUtils.h"
-#include "tools/ToolUtils.h"
-
-#include "include/gpu/GrBackendSurface.h"
-#include "include/gpu/GrDirectContext.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrGpu.h"
 #include "src/gpu/GrProxyProvider.h"
+#include "tests/Test.h"
+#include "tools/gpu/BackendSurfaceFactory.h"
 
 #include <initializer_list>
 
@@ -462,21 +461,16 @@ static void test_write_pixels_non_texture(skiatest::Reporter* reporter,
         return;
     }
     for (auto& origin : { kTopLeft_GrSurfaceOrigin, kBottomLeft_GrSurfaceOrigin }) {
-        GrBackendTexture backendTex;
-        CreateBackendTexture(dContext, &backendTex, DEV_W, DEV_H, kRGBA_8888_SkColorType,
-                             SkColors::kTransparent, GrMipmapped::kNo, GrRenderable::kYes,
-                             GrProtected::kNo);
-        if (!backendTex.isValid()) {
-            continue;
-        }
         SkColorType colorType = kN32_SkColorType;
-        sk_sp<SkSurface> surface(SkSurface::MakeFromBackendTextureAsRenderTarget(
-                dContext, backendTex, origin, sampleCnt, colorType, nullptr, nullptr));
+        auto surface = sk_gpu_test::MakeBackendRenderTargetSurface(dContext,
+                                                                   {DEV_W, DEV_H},
+                                                                   origin,
+                                                                   sampleCnt,
+                                                                   colorType);
         if (surface) {
             auto ii = SkImageInfo::MakeN32Premul(DEV_W, DEV_H);
             test_write_pixels(reporter, surface.get(), ii);
         }
-        dContext->deleteBackendTexture(backendTex);
     }
 }
 
@@ -575,4 +569,24 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(WritePixelsPendingIO, reporter, ctxInfo) {
     }
 
     REPORTER_ASSERT(reporter, isCorrect);
+}
+
+DEF_TEST(WritePixels_InvalidRowBytes, reporter) {
+    auto dstII = SkImageInfo::Make({10, 10}, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+    auto surf = SkSurface::MakeRaster(dstII);
+    for (int ct = 0; ct < kLastEnum_SkColorType + 1; ++ct) {
+        auto colorType = static_cast<SkColorType>(ct);
+
+        size_t bpp = SkColorTypeBytesPerPixel(colorType);
+        if (bpp <= 1) {
+            continue;
+        }
+        auto srcII = dstII.makeColorType(colorType);
+        size_t badRowBytes = (surf->width() + 1)*bpp - 1;
+        auto storage = std::make_unique<char[]>(badRowBytes*surf->height());
+        memset(storage.get(), 0, badRowBytes * surf->height());
+        // SkSurface::writePixels doesn't report bool, SkCanvas's does.
+        REPORTER_ASSERT(reporter,
+                        !surf->getCanvas()->writePixels(srcII, storage.get(), badRowBytes, 0, 0));
+    }
 }

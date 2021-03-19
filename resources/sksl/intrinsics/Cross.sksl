@@ -1,0 +1,1 @@
+uniform half2 a, b; void main() { sk_FragColor.x = cross(a, b); }

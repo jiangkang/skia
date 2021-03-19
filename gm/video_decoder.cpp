@@ -34,7 +34,7 @@ protected:
     }
 
     void onDraw(SkCanvas* canvas) override {
-        GrContext* rContext = canvas->recordingContext();
+        auto* rContext = canvas->recordingContext();
         if (!rContext) {
             return;
         }
@@ -51,7 +51,7 @@ protected:
             if (0) {
                 SkDebugf("ts %g\n", timeStamp);
             }
-            canvas->drawImage(img, 10, 10, nullptr);
+            canvas->drawImage(img, 10, 10);
         }
     }
 

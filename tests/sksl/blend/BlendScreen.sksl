@@ -1,7 +1,0 @@
-/*#pragma settings Default*/
-
-uniform half4 src, dst;
-
-half4 main() {
-    return blend_screen(src, dst);
-}

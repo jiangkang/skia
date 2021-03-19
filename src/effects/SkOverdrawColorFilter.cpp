@@ -9,16 +9,17 @@
 #include "include/effects/SkOverdrawColorFilter.h"
 #include "include/effects/SkRuntimeEffect.h"
 #include "include/private/SkColorData.h"
+#include "src/core/SkRuntimeEffectPriv.h"
 
 sk_sp<SkColorFilter> SkOverdrawColorFilter::MakeWithSkColors(const SkColor colors[kNumColors]) {
-    auto [effect, err] = SkRuntimeEffect::Make(SkString(R"(
+    sk_sp<SkRuntimeEffect> effect = SkMakeCachedRuntimeEffect(R"(
         uniform half4 color0;
         uniform half4 color1;
         uniform half4 color2;
         uniform half4 color3;
         uniform half4 color4;
         uniform half4 color5;
-        in shader input;
+        uniform shader input;
 
         half4 main() {
             half4 color = sample(input);
@@ -30,7 +31,7 @@ sk_sp<SkColorFilter> SkOverdrawColorFilter::MakeWithSkColors(const SkColor color
                   : alpha < 4.5 ? color4 : color5;
             return color;
         }
-    )"));
+    )");
     if (effect) {
         auto data = SkData::MakeUninitialized(kNumColors * sizeof(SkPMColor4f));
         SkPMColor4f* premul = (SkPMColor4f*)data->writable_data();

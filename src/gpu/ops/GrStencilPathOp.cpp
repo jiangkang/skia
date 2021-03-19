@@ -14,28 +14,26 @@
 #include "src/gpu/GrRecordingContextPriv.h"
 #include "src/gpu/GrRenderTarget.h"
 
-std::unique_ptr<GrOp> GrStencilPathOp::Make(GrRecordingContext* context,
-                                            const SkMatrix& viewMatrix,
-                                            bool useHWAA,
-                                            bool hasStencilClip,
-                                            const GrScissorState& scissor,
-                                            sk_sp<const GrPath> path) {
-    GrOpMemoryPool* pool = context->priv().opMemoryPool();
-
-    return pool->allocate<GrStencilPathOp>(viewMatrix, useHWAA,
-                                           hasStencilClip, scissor, std::move(path));
+GrOp::Owner GrStencilPathOp::Make(GrRecordingContext* context,
+                                  const SkMatrix& viewMatrix,
+                                  bool useHWAA,
+                                  bool hasStencilClip,
+                                  const GrScissorState& scissor,
+                                  sk_sp<const GrPath> path) {
+    return GrOp::Make<GrStencilPathOp>(context, viewMatrix, useHWAA,
+                                       hasStencilClip, scissor, std::move(path));
 }
 
 void GrStencilPathOp::onExecute(GrOpFlushState* state, const SkRect& chainBounds) {
-    GrRenderTarget* rt = state->drawOpArgs().proxy()->peekRenderTarget();
+    GrRenderTarget* rt = state->drawOpArgs().rtProxy()->peekRenderTarget();
     SkASSERT(rt);
 
     int numStencilBits = rt->numStencilBits();
     GrStencilSettings stencil(GrPathRendering::GetStencilPassSettings(fPath->getFillType()),
                               fHasStencilClip, numStencilBits);
 
-    GrPathRendering::StencilPathArgs args(fUseHWAA, state->drawOpArgs().proxy(),
-                                          state->drawOpArgs().origin(),
+    GrPathRendering::StencilPathArgs args(fUseHWAA, state->drawOpArgs().rtProxy(),
+                                          state->drawOpArgs().writeView().origin(),
                                           &fViewMatrix, &fScissor, &stencil);
     state->gpu()->pathRendering()->stencilPath(args, fPath.get());
 }

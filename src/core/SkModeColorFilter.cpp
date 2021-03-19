@@ -38,17 +38,15 @@ bool SkModeColorFilter::onAsAColorMode(SkColor* color, SkBlendMode* mode) const 
     return true;
 }
 
-uint32_t SkModeColorFilter::onGetFlags() const {
-    uint32_t flags = 0;
+bool SkModeColorFilter::onIsAlphaUnchanged() const {
     switch (fMode) {
         case SkBlendMode::kDst:      //!< [Da, Dc]
         case SkBlendMode::kSrcATop:  //!< [Da, Sc * Da + (1 - Sa) * Dc]
-            flags |= kAlphaUnchanged_Flag;
-            break;
+            return true;
         default:
             break;
     }
-    return flags;
+    return false;
 }
 
 void SkModeColorFilter::flatten(SkWriteBuffer& buffer) const {
@@ -75,9 +73,11 @@ bool SkModeColorFilter::onAppendStages(const SkStageRec& rec, bool shaderIsOpaqu
 skvm::Color SkModeColorFilter::onProgram(skvm::Builder* p, skvm::Color c,
                                          SkColorSpace* dstCS,
                                          skvm::Uniforms* uniforms, SkArenaAlloc*) const {
+    SkColor4f color = SkColor4f::FromColor(fColor);
+    SkColorSpaceXformSteps(sk_srgb_singleton(), kUnpremul_SkAlphaType,
+                                         dstCS,   kPremul_SkAlphaType).apply(color.vec());
     skvm::Color dst = c,
-                src = p->uniformPremul(SkColor4f::FromColor(fColor), sk_srgb_singleton(),
-                                       uniforms, dstCS);
+                src = p->uniformColor(color, uniforms);
     return p->blend(fMode, src,dst);
 }
 

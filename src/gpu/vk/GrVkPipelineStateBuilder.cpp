@@ -10,13 +10,14 @@
 #include "include/gpu/GrDirectContext.h"
 #include "src/core/SkTraceEvent.h"
 #include "src/gpu/GrAutoLocaleSetter.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrPersistentCacheUtils.h"
 #include "src/gpu/GrShaderCaps.h"
 #include "src/gpu/GrShaderUtils.h"
 #include "src/gpu/GrStencilSettings.h"
 #include "src/gpu/vk/GrVkDescriptorSetManager.h"
 #include "src/gpu/vk/GrVkGpu.h"
+#include "src/gpu/vk/GrVkPipeline.h"
 #include "src/gpu/vk/GrVkRenderPass.h"
 #include "src/gpu/vk/GrVkRenderTarget.h"
 
@@ -25,9 +26,12 @@ GrVkPipelineState* GrVkPipelineStateBuilder::CreatePipelineState(
         GrRenderTarget* renderTarget,
         const GrProgramDesc& desc,
         const GrProgramInfo& programInfo,
-        VkRenderPass compatibleRenderPass) {
+        VkRenderPass compatibleRenderPass,
+        bool overrideSubpassForResolveLoad) {
 
-    gpu->stats()->incShaderCompilations();
+    GrVkResourceProvider& resourceProvider = gpu->resourceProvider();
+
+    resourceProvider.pipelineStateCache()->stats()->incShaderCompilations();
 
     // ensure that we use "." as a decimal separator when creating SkSL code
     GrAutoLocaleSetter als("C");
@@ -40,7 +44,7 @@ GrVkPipelineState* GrVkPipelineStateBuilder::CreatePipelineState(
         return nullptr;
     }
 
-    return builder.finalize(desc, compatibleRenderPass);
+    return builder.finalize(desc, compatibleRenderPass, overrideSubpassForResolveLoad);
 }
 
 GrVkPipelineStateBuilder::GrVkPipelineStateBuilder(GrVkGpu* gpu,
@@ -54,6 +58,10 @@ GrVkPipelineStateBuilder::GrVkPipelineStateBuilder(GrVkGpu* gpu,
 
 const GrCaps* GrVkPipelineStateBuilder::caps() const {
     return fGpu->caps();
+}
+
+SkSL::Compiler* GrVkPipelineStateBuilder::shaderCompiler() const {
+    return fGpu->shaderCompiler();
 }
 
 void GrVkPipelineStateBuilder::finalizeFragmentOutputColor(GrShaderVar& outputColor) {
@@ -154,19 +162,21 @@ void GrVkPipelineStateBuilder::storeShadersInCache(const SkSL::String shaders[],
     // to the key right after the base key.
     sk_sp<SkData> key = SkData::MakeWithoutCopy(this->desc().asKey(),
                                                 this->desc().initialKeyLength()+4);
+    SkString description = GrProgramDesc::Describe(fRenderTarget, fProgramInfo, *this->caps());
 
     sk_sp<SkData> data = GrPersistentCacheUtils::PackCachedShaders(isSkSL ? kSKSL_Tag : kSPIRV_Tag,
                                                                    shaders,
                                                                    inputs, kGrShaderTypeCount);
-    this->gpu()->getContext()->priv().getPersistentCache()->store(*key, *data);
+
+    this->gpu()->getContext()->priv().getPersistentCache()->store(*key, *data, description);
 }
 
 GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
-                                                      VkRenderPass compatibleRenderPass) {
-    TRACE_EVENT0("skia.gpu", TRACE_FUNC);
+                                                      VkRenderPass compatibleRenderPass,
+                                                      bool overrideSubpassForResolveLoad) {
+    TRACE_EVENT0("skia.shaders", TRACE_FUNC);
 
     VkDescriptorSetLayout dsLayout[GrVkUniformHandler::kDescSetCount];
-    VkPipelineLayout pipelineLayout;
     VkShaderModule shaderModules[kGrShaderTypeCount] = { VK_NULL_HANDLE,
                                                          VK_NULL_HANDLE,
                                                          VK_NULL_HANDLE };
@@ -183,27 +193,6 @@ GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
 
     dsLayout[GrVkUniformHandler::kInputDescSet] = resourceProvider.getInputDSLayout();
 
-    bool usesInput = fProgramInfo.pipeline().usesInputAttachment();
-    uint32_t layoutCount =
-            usesInput ? GrVkUniformHandler::kDescSetCount : (GrVkUniformHandler::kDescSetCount - 1);
-    // Create the VkPipelineLayout
-    VkPipelineLayoutCreateInfo layoutCreateInfo;
-    memset(&layoutCreateInfo, 0, sizeof(VkPipelineLayoutCreateFlags));
-    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutCreateInfo.pNext = nullptr;
-    layoutCreateInfo.flags = 0;
-    layoutCreateInfo.setLayoutCount = layoutCount;
-    layoutCreateInfo.pSetLayouts = dsLayout;
-    layoutCreateInfo.pushConstantRangeCount = 0;
-    layoutCreateInfo.pPushConstantRanges = nullptr;
-
-    VkResult result;
-    GR_VK_CALL_RESULT(fGpu, result, CreatePipelineLayout(fGpu->device(), &layoutCreateInfo, nullptr,
-                                                         &pipelineLayout));
-    if (result != VK_SUCCESS) {
-        return nullptr;
-    }
-
     // We need to enable the following extensions so that the compiler can correctly make spir-v
     // from our glsl shaders.
     fVS.extensions().appendf("#extension GL_ARB_separate_shader_objects : enable\n");
@@ -213,15 +202,19 @@ GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
 
     this->finalizeShaders();
 
+    bool usePushConstants = fUniformHandler.usePushConstants();
     VkPipelineShaderStageCreateInfo shaderStageInfo[3];
     SkSL::Program::Settings settings;
-    settings.fCaps = this->caps()->shaderCaps();
     settings.fRTHeightBinding = this->gpu()->vkCaps().getFragmentUniformBinding();
     settings.fRTHeightSet = this->gpu()->vkCaps().getFragmentUniformSet();
-    settings.fFlipY = this->origin() != kTopLeft_GrSurfaceOrigin;
+    settings.fFlipY = fUniformHandler.getFlipY();
     settings.fSharpenTextures =
                         this->gpu()->getContext()->priv().options().fSharpenMipmappedTextures;
     settings.fRTHeightOffset = fUniformHandler.getRTHeightOffset();
+    settings.fUsePushConstants = usePushConstants;
+    if (fFS.fForceHighPrecision) {
+        settings.fForceHighPrecision = true;
+    }
     SkASSERT(!this->fragColorIsInOut());
 
     sk_sp<SkData> cached;
@@ -302,8 +295,6 @@ GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
                                                                         shaderModules[i], nullptr));
                 }
             }
-            GR_VK_CALL(fGpu->vkInterface(), DestroyPipelineLayout(fGpu->device(), pipelineLayout,
-                                                                  nullptr));
             return nullptr;
         }
 
@@ -320,9 +311,53 @@ GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
         }
     }
 
-    GrVkPipeline* pipeline = resourceProvider.createPipeline(fProgramInfo, shaderStageInfo,
-                                                             numShaderStages, compatibleRenderPass,
-                                                             pipelineLayout);
+    bool usesInput = SkToBool(fProgramInfo.renderPassBarriers() & GrXferBarrierFlags::kTexture);
+    uint32_t layoutCount =
+        usesInput ? GrVkUniformHandler::kDescSetCount : (GrVkUniformHandler::kDescSetCount - 1);
+    // Create the VkPipelineLayout
+    VkPipelineLayoutCreateInfo layoutCreateInfo;
+    memset(&layoutCreateInfo, 0, sizeof(VkPipelineLayoutCreateFlags));
+    layoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCreateInfo.pNext = nullptr;
+    layoutCreateInfo.flags = 0;
+    layoutCreateInfo.setLayoutCount = layoutCount;
+    layoutCreateInfo.pSetLayouts = dsLayout;
+    VkPushConstantRange pushConstantRange = {};
+    if (usePushConstants) {
+        pushConstantRange.stageFlags = fGpu->vkCaps().getPushConstantStageFlags();
+        pushConstantRange.offset = 0;
+        // size must be a multiple of 4
+        SkASSERT(!SkToBool(fUniformHandler.currentOffset() & 0x3));
+        pushConstantRange.size = fUniformHandler.currentOffset();
+        layoutCreateInfo.pushConstantRangeCount = 1;
+        layoutCreateInfo.pPushConstantRanges = &pushConstantRange;
+    } else {
+        layoutCreateInfo.pushConstantRangeCount = 0;
+        layoutCreateInfo.pPushConstantRanges = nullptr;
+    }
+
+    VkPipelineLayout pipelineLayout;
+    VkResult result;
+    GR_VK_CALL_RESULT(fGpu, result, CreatePipelineLayout(fGpu->device(), &layoutCreateInfo, nullptr,
+                                                         &pipelineLayout));
+    if (result != VK_SUCCESS) {
+        return nullptr;
+    }
+
+    // For the vast majority of cases we only have one subpass so we default piplines to subpass 0.
+    // However, if we need to load a resolve into msaa attachment for discardable msaa then the
+    // main subpass will be 1.
+    uint32_t subpass = 0;
+    if (overrideSubpassForResolveLoad ||
+        (fProgramInfo.colorLoadOp() == GrLoadOp::kLoad &&
+         fProgramInfo.targetSupportsVkResolveLoad() &&
+         fGpu->vkCaps().preferDiscardableMSAAAttachment())) {
+        subpass = 1;
+    }
+    sk_sp<const GrVkPipeline> pipeline = resourceProvider.makePipeline(
+            fProgramInfo, shaderStageInfo, numShaderStages, compatibleRenderPass, pipelineLayout,
+            subpass);
+
     for (int i = 0; i < kGrShaderTypeCount; ++i) {
         // This if check should not be needed since calling destroy on a VK_NULL_HANDLE is allowed.
         // However this is causing a crash in certain drivers (e.g. NVidia).
@@ -339,13 +374,14 @@ GrVkPipelineState* GrVkPipelineStateBuilder::finalize(const GrProgramDesc& desc,
     }
 
     return new GrVkPipelineState(fGpu,
-                                 pipeline,
+                                 std::move(pipeline),
                                  samplerDSHandle,
                                  fUniformHandles,
                                  fUniformHandler.fUniforms,
-                                 fUniformHandler.fCurrentUBOOffset,
+                                 fUniformHandler.currentOffset(),
+                                 fUniformHandler.usePushConstants(),
                                  fUniformHandler.fSamplers,
                                  std::move(fGeometryProcessor),
                                  std::move(fXferProcessor),
-                                 std::move(fFragmentProcessors));
+                                 std::move(fFPImpls));
 }

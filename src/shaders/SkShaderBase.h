@@ -10,6 +10,8 @@
 
 #include "include/core/SkFilterQuality.h"
 #include "include/core/SkMatrix.h"
+#include "include/core/SkPaint.h"
+#include "include/core/SkSamplingOptions.h"
 #include "include/core/SkShader.h"
 #include "include/private/SkNoncopyable.h"
 #include "src/core/SkEffectPriv.h"
@@ -21,7 +23,6 @@
 #include "src/gpu/GrFPArgs.h"
 #endif
 
-class GrContext;
 class GrFragmentProcessor;
 class SkArenaAlloc;
 class SkColorSpace;
@@ -85,17 +86,22 @@ public:
     struct ContextRec {
         ContextRec(const SkPaint& paint, const SkMatrix& matrix, const SkMatrix* localM,
                    SkColorType dstColorType, SkColorSpace* dstColorSpace)
-            : fPaint(&paint)
-            , fMatrix(&matrix)
+            : fMatrix(&matrix)
             , fLocalMatrix(localM)
             , fDstColorType(dstColorType)
-            , fDstColorSpace(dstColorSpace) {}
+            , fDstColorSpace(dstColorSpace) {
+                fPaintSampling = SkSamplingOptions(paint.getFilterQuality());
+                fPaintAlpha = paint.getAlpha();
+                fPaintDither = paint.isDither();
+            }
 
-        const SkPaint*  fPaint;            // the current paint associated with the draw
         const SkMatrix* fMatrix;           // the current matrix in the canvas
         const SkMatrix* fLocalMatrix;      // optional local matrix
         SkColorType     fDstColorType;     // the color type of the dest surface
         SkColorSpace*   fDstColorSpace;    // the color space of the dest surface (if any)
+        SkSamplingOptions fPaintSampling;  // only used for legacy-built shaders (inherit sampling)
+        SkAlpha           fPaintAlpha;
+        bool              fPaintDither;
 
         bool isLegacyCompatible(SkColorSpace* shadersColorSpace) const;
     };
@@ -147,14 +153,14 @@ public:
 
 #if SK_SUPPORT_GPU
     /**
-     *  Returns a GrFragmentProcessor that implements the shader for the GPU backend. NULL is
+     *  Returns a GrFragmentProcessor that implements the shader for the GPU backend. nullptr is
      *  returned if there is no GPU implementation.
      *
      *  The GPU device does not call SkShader::createContext(), instead we pass the view matrix,
      *  local matrix, and filter quality directly.
      *
-     *  The GrContext may be used by the to create textures that are required by the returned
-     *  processor.
+     *  The GrRecordingContext may be used by the to create textures that are required by the
+     *  returned processor.
      *
      *  The returned GrFragmentProcessor should expect an unpremultiplied input color and
      *  produce a premultiplied output.
@@ -253,7 +259,7 @@ private:
                                   skvm::Coord device, skvm::Coord local, skvm::Color paint,
                                   const SkMatrixProvider&, const SkMatrix* localM,
                                   SkFilterQuality quality, const SkColorInfo& dst,
-                                  skvm::Uniforms* uniforms, SkArenaAlloc* alloc) const;
+                                  skvm::Uniforms* uniforms, SkArenaAlloc* alloc) const = 0;
 
     using INHERITED = SkShader;
 };

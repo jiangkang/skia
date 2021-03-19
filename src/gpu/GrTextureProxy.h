@@ -68,7 +68,7 @@ public:
     /**
      * Return the texture proxy's unique key. It will be invalid if the proxy doesn't have one.
      */
-    const GrUniqueKey& getUniqueKey() const {
+    const GrUniqueKey& getUniqueKey() const override {
 #ifdef SK_DEBUG
         if (this->isInstantiated() && fUniqueKey.isValid() && fSyncTargetKey &&
             fCreatingProvider == GrDDLProvider::kNo) {
@@ -194,7 +194,7 @@ private:
     // point, the proxy is instantiated, and this data is used to perform an ASAP upload.
     std::unique_ptr<GrDeferredProxyUploader> fDeferredUploader;
 
-    size_t onUninstantiatedGpuMemorySize(const GrCaps&) const override;
+    size_t onUninstantiatedGpuMemorySize() const override;
 
     // Methods made available via GrTextureProxy::CacheAccess
     void setUniqueKey(GrProxyProvider*, const GrUniqueKey&);

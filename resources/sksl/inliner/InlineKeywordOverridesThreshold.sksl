@@ -1,0 +1,11 @@
+inline int tooBig(int x) {
+    ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x;
+    ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x; ++x;
+    return x;
+}
+
+void main() {
+    int y = 0;
+    y = tooBig(y);
+    y = tooBig(y);
+}

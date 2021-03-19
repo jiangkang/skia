@@ -153,8 +153,8 @@ bool GrTextureEffect::Sampling::hasBorderAlpha() const {
 static void get_matrix(const SkMatrix& preMatrix, const GrSurfaceProxyView& view,
                        SkMatrix* outMatrix, bool* outLazyProxyNormalization) {
     SkMatrix combined = preMatrix;
-    bool normalize = view.proxy()->backendFormat().textureType() != GrTextureType::kRectangle;
-    if (normalize) {
+    bool canNormalize = view.proxy()->backendFormat().textureType() != GrTextureType::kRectangle;
+    if (canNormalize) {
         if (view.proxy()->isFullyLazy()) {
             *outLazyProxyNormalization = true;
         } else {
@@ -166,15 +166,17 @@ static void get_matrix(const SkMatrix& preMatrix, const GrSurfaceProxyView& view
         *outLazyProxyNormalization = false;
     }
     if (view.origin() == kBottomLeft_GrSurfaceOrigin) {
-        if (normalize) {
-            // combined.postScale(1,-1);
-            // combined.postTranslate(0,1);
-            combined.set(SkMatrix::kMSkewY,
-                         combined[SkMatrix::kMPersp0] - combined[SkMatrix::kMSkewY]);
-            combined.set(SkMatrix::kMScaleY,
-                         combined[SkMatrix::kMPersp1] - combined[SkMatrix::kMScaleY]);
-            combined.set(SkMatrix::kMTransY,
-                         combined[SkMatrix::kMPersp2] - combined[SkMatrix::kMTransY]);
+        if (canNormalize) {
+            if (!view.proxy()->isFullyLazy()) {
+                // combined.postScale(1,-1);
+                // combined.postTranslate(0,1);
+                combined.set(SkMatrix::kMSkewY,
+                             combined[SkMatrix::kMPersp0] - combined[SkMatrix::kMSkewY]);
+                combined.set(SkMatrix::kMScaleY,
+                             combined[SkMatrix::kMPersp1] - combined[SkMatrix::kMScaleY]);
+                combined.set(SkMatrix::kMTransY,
+                             combined[SkMatrix::kMPersp2] - combined[SkMatrix::kMTransY]);
+            }
         } else {
             // combined.postScale(1, -1);
             // combined.postTranslate(0,1);
@@ -325,7 +327,7 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
 
     if (te.fShaderModes[0] == ShaderMode::kNone &&
         te.fShaderModes[1] == ShaderMode::kNone) {
-        fb->codeAppendf("%s = ", args.fOutputColor);
+        fb->codeAppendf("return ");
         if (te.fLazyProxyNormalization) {
             const char* norm = nullptr;
             fNormUni = args.fUniformHandler->addUniform(&te, kFragment_GrShaderFlag,
@@ -337,11 +339,6 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
         }
         fb->codeAppendf(";");
     } else {
-        // Tripping this assert means we have a normalized fully lazy proxy with a
-        // non-default ShaderMode. There's nothing fundamentally wrong with doing that, but
-        // it hasn't been tested and this code path probably won't handle normalization
-        // properly in that case.
-        SkASSERT(!te.fLazyProxyNormalization);
         // Here is the basic flow of the various ShaderModes are implemented in a series of
         // steps. Not all the steps apply to all the modes. We try to emit only the steps
         // that are necessary for the given x/y shader modes.
@@ -365,7 +362,7 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
 
         const auto& m = te.fShaderModes;
         GrTextureType textureType = te.view().proxy()->backendFormat().textureType();
-        bool normCoords = textureType != GrTextureType::kRectangle;
+        bool canNormalize = textureType != GrTextureType::kRectangle;
 
         const char* borderName = nullptr;
         if (te.hasClampToBorderShaderMode()) {
@@ -435,16 +432,22 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                     &te, kFragment_GrShaderFlag, kFloat4_GrSLType, "clamp", &clampName);
         }
 
+        bool unormCoordsRequired = modeRequiresUnormCoords(m[0]) || modeRequiresUnormCoords(m[1]);
+
         const char* norm = nullptr;
-        if (normCoords && (modeRequiresUnormCoords(m[0]) ||
-                           modeRequiresUnormCoords(m[1]))) {
+        if (canNormalize && (unormCoordsRequired || te.fLazyProxyNormalization)) {
             // TODO: Detect support for textureSize() or polyfill textureSize() in SkSL and
             // always use?
             fNormUni = args.fUniformHandler->addUniform(&te, kFragment_GrShaderFlag,
                                                         kFloat4_GrSLType, "norm", &norm);
-            // TODO: Remove the normalization from the CoordTransform to skip unnormalizing
-            // step here.
-            fb->codeAppendf("inCoord *= %s.xy;", norm);
+
+            if (!te.fLazyProxyNormalization) {
+                // TODO: Remove the normalization from the CoordTransform to skip unnormalizing
+                // step here.
+                fb->codeAppendf("inCoord *= %s.xy;", norm);
+            } else if (te.view().origin() == kBottomLeft_GrSurfaceOrigin) {
+                fb->codeAppendf("inCoord.y = %s.y - inCoord.y;", norm);
+            }
         }
 
         // Generates a string to read at a coordinate, normalizing coords if necessary.
@@ -479,8 +482,7 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                 case ShaderMode::kRepeat_Nearest_None:
                 case ShaderMode::kRepeat_Linear_None:
                     fb->codeAppendf(
-                            "subsetCoord.%s = mod(inCoord.%s - %s.%s, %s.%s - %s.%s) + "
-                            "%s.%s;",
+                            "subsetCoord.%s = mod(inCoord.%s - %s.%s, %s.%s - %s.%s) + %s.%s;",
                             coordSwizzle, coordSwizzle, subsetName, subsetStartSwizzle, subsetName,
                             subsetStopSwizzle, subsetName, subsetStartSwizzle, subsetName,
                             subsetStartSwizzle);
@@ -514,10 +516,8 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                     // sample taken using subsetCoord and a sample at extraCoord.
                     fb->codeAppend("float hw = w/2;");
                     fb->codeAppend("float n = mod(d - hw, w2);");
-                    fb->codeAppendf(
-                            "%s = saturate(half(mix(n, w2 - n, step(w, n)) - hw + "
-                            "0.5));",
-                            coordWeight);
+                    fb->codeAppendf("%s = saturate(half(mix(n, w2 - n, step(w, n)) - hw + 0.5));",
+                                    coordWeight);
                     fb->codeAppend("}");
                     break;
                 case ShaderMode::kMirrorRepeat:
@@ -539,11 +539,11 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                               const char* clampStartSwizzle,
                               const char* clampStopSwizzle) {
             if (clamp) {
-                fb->codeAppendf("clampedCoord.%s = clamp(subsetCoord.%s, %s.%s, %s.%s);",
+                fb->codeAppendf("clampedCoord%s = clamp(subsetCoord%s, %s%s, %s%s);",
                                 coordSwizzle, coordSwizzle, clampName, clampStartSwizzle, clampName,
                                 clampStopSwizzle);
             } else {
-                fb->codeAppendf("clampedCoord.%s = subsetCoord.%s;", coordSwizzle, coordSwizzle);
+                fb->codeAppendf("clampedCoord%s = subsetCoord%s;", coordSwizzle, coordSwizzle);
             }
         };
 
@@ -558,14 +558,17 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
         bool mipmapRepeatY = m[1] == ShaderMode::kRepeat_Nearest_Mipmap ||
                              m[1] == ShaderMode::kRepeat_Linear_Mipmap;
 
+        if (mipmapRepeatX || mipmapRepeatY) {
+            fb->codeAppend("float2 extraRepeatCoord;");
+        }
         if (mipmapRepeatX) {
-            fb->codeAppend("float extraRepeatCoordX; half repeatCoordWeightX;");
-            extraRepeatCoordX   = "extraRepeatCoordX";
+            fb->codeAppend("half repeatCoordWeightX;");
+            extraRepeatCoordX   = "extraRepeatCoord.x";
             repeatCoordWeightX  = "repeatCoordWeightX";
         }
         if (mipmapRepeatY) {
-            fb->codeAppend("float extraRepeatCoordY; half repeatCoordWeightY;");
-            extraRepeatCoordY   = "extraRepeatCoordY";
+            fb->codeAppend("half repeatCoordWeightY;");
+            extraRepeatCoordY   = "extraRepeatCoord.y";
             repeatCoordWeightY  = "repeatCoordWeightY";
         }
 
@@ -574,17 +577,22 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
         subsetCoord(te.fShaderModes[0], "x", "x", "z", extraRepeatCoordX, repeatCoordWeightX);
         subsetCoord(te.fShaderModes[1], "y", "y", "w", extraRepeatCoordY, repeatCoordWeightY);
         fb->codeAppend("float2 clampedCoord;");
-        clampCoord(useClamp[0], "x", "x", "z");
-        clampCoord(useClamp[1], "y", "y", "w");
-
-        // Additional clamping for the extra coords for kRepeat with mip maps.
-        if (mipmapRepeatX) {
-            fb->codeAppendf("extraRepeatCoordX = clamp(extraRepeatCoordX, %s.x, %s.z);", clampName,
-                            clampName);
+        if (useClamp[0] == useClamp[1]) {
+            clampCoord(useClamp[0], "", ".xy", ".zw");
+        } else {
+            clampCoord(useClamp[0], ".x", ".x", ".z");
+            clampCoord(useClamp[1], ".y", ".y", ".w");
         }
-        if (mipmapRepeatY) {
-            fb->codeAppendf("extraRepeatCoordY = clamp(extraRepeatCoordY, %s.y, %s.w);", clampName,
-                            clampName);
+        // Additional clamping for the extra coords for kRepeat with mip maps.
+        if (mipmapRepeatX && mipmapRepeatY) {
+            fb->codeAppendf("extraRepeatCoord = clamp(extraRepeatCoord, %s.xy, %s.zw);",
+                            clampName, clampName);
+        } else if (mipmapRepeatX) {
+            fb->codeAppendf("extraRepeatCoord.x = clamp(extraRepeatCoord.x, %s.x, %s.z);",
+                            clampName, clampName);
+        } else if (mipmapRepeatY) {
+            fb->codeAppendf("extraRepeatCoord.y = clamp(extraRepeatCoord.y, %s.y, %s.w);",
+                            clampName, clampName);
         }
 
         // Do the 2 or 4 texture reads for kRepeatMipMap and then apply the weight(s)
@@ -597,18 +605,18 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                     "       mix(%s, %s, repeatCoordWeightX),"
                     "       repeatCoordWeightY);",
                     read("clampedCoord").c_str(),
-                    read("float2(extraRepeatCoordX, clampedCoord.y)").c_str(),
-                    read("float2(clampedCoord.x, extraRepeatCoordY)").c_str(),
-                    read("float2(extraRepeatCoordX, extraRepeatCoordY)").c_str());
+                    read("float2(extraRepeatCoord.x, clampedCoord.y)").c_str(),
+                    read("float2(clampedCoord.x, extraRepeatCoord.y)").c_str(),
+                    read("float2(extraRepeatCoord.x, extraRepeatCoord.y)").c_str());
 
         } else if (mipmapRepeatX) {
             fb->codeAppendf("half4 textureColor = mix(%s, %s, repeatCoordWeightX);",
                             read("clampedCoord").c_str(),
-                            read("float2(extraRepeatCoordX, clampedCoord.y)").c_str());
+                            read("float2(extraRepeatCoord.x, clampedCoord.y)").c_str());
         } else if (mipmapRepeatY) {
             fb->codeAppendf("half4 textureColor = mix(%s, %s, repeatCoordWeightY);",
                             read("clampedCoord").c_str(),
-                            read("float2(clampedCoord.x, extraRepeatCoordY)").c_str());
+                            read("float2(clampedCoord.x, extraRepeatCoord.y)").c_str());
         } else {
             fb->codeAppendf("half4 textureColor = %s;", read("clampedCoord").c_str());
         }
@@ -701,7 +709,7 @@ void GrTextureEffect::Impl::emitCode(EmitArgs& args) {
                     "}",
                     subsetName, subsetName, borderName);
         }
-        fb->codeAppendf("%s = textureColor;", args.fOutputColor);
+        fb->codeAppendf("return textureColor;");
     }
 }
 
@@ -751,12 +759,23 @@ void GrTextureEffect::Impl::onSetData(const GrGLSLProgramDataManager& pdm,
     }
 }
 
-GrGLSLFragmentProcessor* GrTextureEffect::onCreateGLSLInstance() const { return new Impl; }
+std::unique_ptr<GrGLSLFragmentProcessor> GrTextureEffect::onMakeProgramImpl() const {
+    return std::make_unique<Impl>();
+}
 
 void GrTextureEffect::onGetGLSLProcessorKey(const GrShaderCaps&, GrProcessorKeyBuilder* b) const {
     auto m0 = static_cast<uint32_t>(fShaderModes[0]);
+    b->addBits(8, m0, "shaderMode0");
+
     auto m1 = static_cast<uint32_t>(fShaderModes[1]);
-    b->add32((m0 << 16) | m1);
+    b->addBits(8, m1, "shaderMode1");
+
+    // The origin only affects the shader code when we're doing last minute normalization
+    // for lazy proxies.
+    b->addBool(fLazyProxyNormalization, "normalization");
+    if (fLazyProxyNormalization) {
+        b->addBits(1, this->view().origin(), "origin");
+    }
 }
 
 bool GrTextureEffect::onIsEqual(const GrFragmentProcessor& other) const {

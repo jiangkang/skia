@@ -305,7 +305,7 @@ DEF_SIMPLE_GM(vertices_data, canvas, 512, 256) {
                 return vtx_color;
             }
         )";
-        auto[effect, errorText] = SkRuntimeEffect::Make(SkString(gProg));
+        auto [effect, errorText] = SkRuntimeEffect::Make(SkString(gProg));
         if (!effect) {
             SK_ABORT("RuntimeEffect error: %s\n", errorText.c_str());
         }
@@ -377,8 +377,8 @@ DEF_SIMPLE_GM(vertices_data_lerp, canvas, 256, 256) {
 
     SkPaint paint;
     const char* gProg = R"(
-        in shader c0;
-        in shader c1;
+        uniform shader c0;
+        uniform shader c1;
         varying float vtx_lerp;
         half4 main(float2 p) {
             half4 col0 = sample(c0, p);
@@ -389,8 +389,8 @@ DEF_SIMPLE_GM(vertices_data_lerp, canvas, 256, 256) {
     auto [effect, errorText] = SkRuntimeEffect::Make(SkString(gProg));
     SkMatrix scale = SkMatrix::Scale(2, 2);
     sk_sp<SkShader> children[] = {
-        GetResourceAsImage("images/mandrill_256.png")->makeShader(),
-        GetResourceAsImage("images/color_wheel.png")->makeShader(scale),
+        GetResourceAsImage("images/mandrill_256.png")->makeShader(SkSamplingOptions()),
+        GetResourceAsImage("images/color_wheel.png")->makeShader(SkSamplingOptions(), scale),
     };
     paint.setShader(effect->makeShader(nullptr, children, 2, nullptr, false));
 

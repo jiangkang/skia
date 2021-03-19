@@ -28,6 +28,11 @@ namespace textlayout {
 
 namespace {
 
+static inline SkUnichar nextUtf8Unit(const char** ptr, const char* end) {
+    SkUnichar val = SkUTF::NextUTF8(ptr, end);
+    return val < 0 ? 0xFFFD : val;
+}
+
 SkScalar littleRound(SkScalar a) {
     // This rounding is done to match Flutter tests. Must be removed..
     auto val = std::fabs(a);
@@ -202,6 +207,12 @@ void ParagraphImpl::layout(SkScalar rawWidth) {
         fMinIntrinsicWidth = fMaxIntrinsicWidth;
     }
 
+    // TODO: Since min and max are calculated differently it's possible to get a rounding error
+    //  that would make min > max. Sort it out later, make it the same for now
+    if (fMaxIntrinsicWidth < fMinIntrinsicWidth) {
+        fMaxIntrinsicWidth = fMinIntrinsicWidth;
+    }
+
     //SkDebugf("layout('%s', %f): %f %f\n", fText.c_str(), rawWidth, fMinIntrinsicWidth, fMaxIntrinsicWidth);
 }
 
@@ -293,6 +304,11 @@ bool ParagraphImpl::computeCodeUnitProperties() {
 
 // Clusters in the order of the input text
 void ParagraphImpl::buildClusterTable() {
+    int cluster_count = 1;
+    for (auto& run : fRuns) {
+        cluster_count += run.isPlaceholder() ? 1 : run.size();
+    }
+    fClusters.reserve_back(cluster_count);
 
     // Walk through all the run in the direction of input text
     for (auto& run : fRuns) {
@@ -308,7 +324,6 @@ void ParagraphImpl::buildClusterTable() {
             fCodeUnitProperties[run.textRange().start] |= CodeUnitFlags::kSoftLineBreakBefore;
             fCodeUnitProperties[run.textRange().end] |= CodeUnitFlags::kSoftLineBreakBefore;
         } else {
-            fClusters.reserve(fClusters.size() + run.size());
             // Walk through the glyph in the direction of input text
             run.iterateThroughClustersInTextOrder([runIndex, this](size_t glyphStart,
                                                                    size_t glyphEnd,
@@ -441,27 +456,6 @@ void ParagraphImpl::breakShapedTextIntoLines(SkScalar maxWidth) {
     fAlphabeticBaseline = fLines.empty() ? fEmptyMetrics.alphabeticBaseline() : fLines.front().alphabeticBaseline();
     fIdeographicBaseline = fLines.empty() ? fEmptyMetrics.ideographicBaseline() : fLines.front().ideographicBaseline();
     fExceededMaxLines = textWrapper.exceededMaxLines();
-
-    // Correct the first and the last line ascents/descents if required
-    if ((fParagraphStyle.getTextHeightBehavior() & TextHeightBehavior::kDisableFirstAscent) != 0) {
-        auto& firstLine = fLines.front();
-        auto delta = firstLine.metricsWithoutMultiplier(TextHeightBehavior::kDisableFirstAscent);
-        if (!SkScalarNearlyZero(delta)) {
-            fHeight += delta;
-            // Shift all the lines up
-            for (auto& line : fLines) {
-                if (line.isFirstLine()) continue;
-                line.shiftVertically(delta);
-            }
-        }
-    }
-
-    if ((fParagraphStyle.getTextHeightBehavior() & TextHeightBehavior::kDisableLastDescent) != 0) {
-        auto& lastLine = fLines.back();
-        auto delta = lastLine.metricsWithoutMultiplier(TextHeightBehavior::kDisableLastDescent);
-        // It's the last line. There is nothing below to shift
-        fHeight += delta;
-    }
 }
 
 void ParagraphImpl::formatLines(SkScalar maxWidth) {
@@ -548,6 +542,12 @@ BlockRange ParagraphImpl::findAllBlocks(TextRange textRange) {
         end = index;
     }
 
+    if (begin == EMPTY_INDEX || end == EMPTY_INDEX) {
+        // It's possible if some text is not covered with any text style
+        // Not in Flutter but in direct use of SkParagraph
+        return EMPTY_RANGE;
+    }
+
     return { begin, end + 1 };
 }
 
@@ -580,7 +580,7 @@ std::vector<TextBox> ParagraphImpl::getRectsForRange(unsigned start,
         return results;
     }
 
-  ensureUTF16Mapping();
+    ensureUTF16Mapping();
 
     if (start >= end || start > fUTF8IndexForUTF16Index.size() || end == 0) {
         return results;
@@ -595,13 +595,22 @@ std::vector<TextBox> ParagraphImpl::getRectsForRange(unsigned start,
     // One flutter test fails because of it but the editing experience is correct
     // (although you have to press the cursor many times before it moves to the next grapheme).
     TextRange text(fText.size(), fText.size());
+    // TODO: This is probably a temp change that makes SkParagraph work as TxtLib
+    //  (so we can compare the results). We now include in the selection box only the graphemes
+    //  that belongs to the given [start:end) range entirely (not the ones that intersect with it)
     if (start < fUTF8IndexForUTF16Index.size()) {
-        text.start = findGraphemeStart(fUTF8IndexForUTF16Index[start]);
+        auto utf8 = fUTF8IndexForUTF16Index[start];
+        // If start points to a trailing surrogate, skip it
+        if (start > 0 && fUTF8IndexForUTF16Index[start - 1] == utf8) {
+            utf8 = fUTF8IndexForUTF16Index[start + 1];
+        }
+        text.start = findNextGraphemeBoundary(utf8);
     }
     if (end < fUTF8IndexForUTF16Index.size()) {
-        text.end = findGraphemeStart(fUTF8IndexForUTF16Index[end]);
+        auto utf8 = findPreviousGraphemeBoundary(fUTF8IndexForUTF16Index[end]);
+        text.end = utf8;
     }
-
+    //SkDebugf("getRectsForRange(%d,%d) -> (%d:%d)\n", start, end, text.start, text.end);
     for (auto& line : fLines) {
         auto lineText = line.textWithSpaces();
         auto intersect = lineText * text;
@@ -657,7 +666,7 @@ PositionWithAffinity ParagraphImpl::getGlyphPositionAtCoordinate(SkScalar dx, Sk
         return {0, Affinity::kDownstream};
     }
 
-  ensureUTF16Mapping();
+    ensureUTF16Mapping();
 
     for (auto& line : fLines) {
         // Let's figure out if we can stop looking
@@ -730,6 +739,41 @@ size_t ParagraphImpl::getWhitespacesLength(TextRange textRange) {
         }
     }
     return len;
+}
+
+static bool is_ascii_7bit_space(int c) {
+    SkASSERT(c >= 0 && c <= 127);
+
+    // Extracted from https://en.wikipedia.org/wiki/Whitespace_character
+    //
+    enum WS {
+        kHT    = 9,
+        kLF    = 10,
+        kVT    = 11,
+        kFF    = 12,
+        kCR    = 13,
+        kSP    = 32,    // too big to use as shift
+    };
+#define M(shift)    (1 << (shift))
+    constexpr uint32_t kSpaceMask = M(kHT) | M(kLF) | M(kVT) | M(kFF) | M(kCR);
+    // we check for Space (32) explicitly, since it is too large to shift
+    return (c == kSP) || (c <= 31 && (kSpaceMask & M(c)));
+#undef M
+}
+
+bool ParagraphImpl::isSpace(TextRange textRange) {
+    auto text = ParagraphImpl::text(textRange);
+    const char* ch = text.begin();
+    if (text.end() - ch == 1 && *(unsigned char*)ch <= 0x7F) {
+        return is_ascii_7bit_space(*ch);
+    }
+    while (ch != text.end()) {
+        SkUnichar unicode = nextUtf8Unit(&ch, text.end());
+        if (!fUnicode->isSpace(unicode)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void ParagraphImpl::getLineMetrics(std::vector<LineMetrics>& metrics) {
@@ -813,22 +857,42 @@ void ParagraphImpl::setState(InternalState state) {
 }
 
 void ParagraphImpl::computeEmptyMetrics() {
-    auto defaultTextStyle = paragraphStyle().getTextStyle();
+
+    // The empty metrics is used to define the height of the empty lines
+    // Unfortunately, Flutter has 2 different cases for that:
+    // 1. An empty line inside the text
+    // 2. An empty paragraph
+    // In the first case SkParagraph takes the metrics from the default paragraph style
+    // In the second case it should take it from the current text style
+    bool emptyParagraph = fRuns.empty();
+    TextStyle textStyle = paragraphStyle().getTextStyle();
+    if (emptyParagraph && !fTextStyles.empty()) {
+        textStyle = fTextStyles.back().fStyle;
+    }
 
     auto typefaces = fontCollection()->findTypefaces(
-      defaultTextStyle.getFontFamilies(), defaultTextStyle.getFontStyle());
+      textStyle.getFontFamilies(), textStyle.getFontStyle());
     auto typeface = typefaces.empty() ? nullptr : typefaces.front();
 
-    SkFont font(typeface, defaultTextStyle.getFontSize());
-
+    SkFont font(typeface, textStyle.getFontSize());
     fEmptyMetrics = InternalLineMetrics(font, paragraphStyle().getStrutStyle().getForceStrutHeight());
-    if (!paragraphStyle().getStrutStyle().getForceStrutHeight() &&
-        defaultTextStyle.getHeightOverride()) {
-        auto multiplier =
-                defaultTextStyle.getHeight() * defaultTextStyle.getFontSize() / fEmptyMetrics.height();
-        fEmptyMetrics = InternalLineMetrics(fEmptyMetrics.ascent() * multiplier,
-                                      fEmptyMetrics.descent() * multiplier,
-                                      fEmptyMetrics.leading() * multiplier);
+
+    if (emptyParagraph) {
+        // For an empty text we apply both TextHeightBehaviour flags
+        // In case of non-empty paragraph TextHeightBehaviour flags will be applied at the appropriate place
+        auto disableFirstAscent = (paragraphStyle().getTextHeightBehavior() & TextHeightBehavior::kDisableFirstAscent) == TextHeightBehavior::kDisableFirstAscent;
+        auto disableLastDescent = (paragraphStyle().getTextHeightBehavior() & TextHeightBehavior::kDisableLastDescent) == TextHeightBehavior::kDisableLastDescent;
+        fEmptyMetrics.update(
+            disableFirstAscent ? fEmptyMetrics.rawAscent() : fEmptyMetrics.ascent(),
+            disableLastDescent ? fEmptyMetrics.rawDescent() : fEmptyMetrics.descent(),
+            fEmptyMetrics.leading());
+    } else if (!paragraphStyle().getStrutStyle().getForceStrutHeight() &&
+        textStyle.getHeightOverride()) {
+        auto multiplier = textStyle.getHeight() * textStyle.getFontSize() / fEmptyMetrics.height();
+        fEmptyMetrics.update(
+            fEmptyMetrics.ascent() * multiplier,
+            fEmptyMetrics.descent() * multiplier,
+            fEmptyMetrics.leading() * multiplier);
     }
 
     if (fParagraphStyle.getStrutStyle().getStrutEnabled()) {
@@ -901,15 +965,20 @@ void ParagraphImpl::updateBackgroundPaint(size_t from, size_t to, SkPaint paint)
     }
 }
 
-TextIndex ParagraphImpl::findGraphemeStart(TextIndex index) {
-    if (index == fText.size()) {
-        return index;
+TextIndex ParagraphImpl::findPreviousGraphemeBoundary(TextIndex utf8) {
+    while (utf8 > 0 &&
+          (fCodeUnitProperties[utf8] & CodeUnitFlags::kGraphemeStart) == 0) {
+        --utf8;
     }
-    while (index > 0 &&
-          (fCodeUnitProperties[index] & CodeUnitFlags::kGraphemeStart) == 0) {
-        --index;
+    return utf8;
+}
+
+TextIndex ParagraphImpl::findNextGraphemeBoundary(TextIndex utf8) {
+    while (utf8 < fText.size() &&
+          (fCodeUnitProperties[utf8] & CodeUnitFlags::kGraphemeStart) == 0) {
+        ++utf8;
     }
-    return index;
+    return utf8;
 }
 
 void ParagraphImpl::ensureUTF16Mapping() {

@@ -8,15 +8,15 @@
 #include "src/gpu/GrClipStack.h"
 
 #include "include/core/SkMatrix.h"
+#include "src/core/SkPathPriv.h"
 #include "src/core/SkRRectPriv.h"
 #include "src/core/SkRectPriv.h"
 #include "src/core/SkTaskGroup.h"
 #include "src/gpu/GrClip.h"
-#include "src/gpu/GrContextPriv.h"
 #include "src/gpu/GrDeferredProxyUploader.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContextPriv.h"
 #include "src/gpu/GrSWMaskHelper.h"
 #include "src/gpu/GrStencilMaskHelper.h"
 #include "src/gpu/ccpr/GrCoverageCountingPathRenderer.h"
@@ -125,6 +125,15 @@ static bool shape_contains_rect(
     if (!mixedAAMode && aToDevice == bToDevice) {
         // A and B are in the same coordinate space, so don't bother mapping
         return a.conservativeContains(b);
+    } else if (bToDevice.isIdentity() && aToDevice.preservesAxisAlignment()) {
+        // Optimize the common case of draws (B, with identity matrix) and axis-aligned shapes,
+        // instead of checking the four corners separately.
+        SkRect bInA = b;
+        if (mixedAAMode) {
+            bInA.outset(0.5f, 0.5f);
+        }
+        SkAssertResult(deviceToA.mapRect(&bInA));
+        return a.conservativeContains(bInA);
     }
 
     // Test each corner for contains; since a is convex, if all 4 corners of b's bounds are
@@ -183,7 +192,7 @@ static uint32_t next_gen_id() {
 
     uint32_t id;
     do {
-        id = nextID++;
+        id = nextID.fetch_add(1, std::memory_order_relaxed);
     } while (id < kFirstUnreservedGenID);
     return id;
 }
@@ -367,7 +376,7 @@ static GrSurfaceProxyView render_sw_mask(GrRecordingContext* context, const SkIR
     }
 }
 
-static void render_stencil_mask(GrRecordingContext* context, GrRenderTargetContext* rtc,
+static void render_stencil_mask(GrRecordingContext* context, GrSurfaceDrawContext* rtc,
                                 uint32_t genID, const SkIRect& bounds,
                                 const GrClipStack::Element** elements, int count,
                                 GrAppliedClip* out) {
@@ -531,7 +540,10 @@ void GrClipStack::RawElement::simplify(const SkIRect& deviceBounds, bool forceAA
         return;
     }
 
-    if (forceAA) {
+    // Except for axis-aligned clip rects, upgrade to AA when forced. We skip axis-aligned clip
+    // rects because a non-AA axis aligned rect can always be set as just a scissor test or window
+    // rect, avoiding an expensive stencil mask generation.
+    if (forceAA && !(fShape.isRect() && fLocalToDevice.preservesAxisAlignment())) {
         fAA = GrAA::kYes;
     }
 
@@ -539,7 +551,7 @@ void GrClipStack::RawElement::simplify(const SkIRect& deviceBounds, bool forceAA
     // mapped bounds of the shape.
     fOuterBounds = GrClip::GetPixelIBounds(outer, fAA, BoundsType::kExterior);
 
-    if (fLocalToDevice.isScaleTranslate()) {
+    if (fLocalToDevice.preservesAxisAlignment()) {
         if (fShape.isRect()) {
             // The actual geometry can be updated to the device-intersected bounds and we can
             // know the inner bounds
@@ -558,16 +570,19 @@ void GrClipStack::RawElement::simplify(const SkIRect& deviceBounds, bool forceAA
                 SkASSERT(fOuterBounds.contains(fInnerBounds) || fInnerBounds.isEmpty());
             }
         } else if (fShape.isRRect()) {
-            // Can't transform in place
-            SkRRect src = fShape.rrect();
-            SkAssertResult(src.transform(fLocalToDevice, &fShape.rrect()));
-            fLocalToDevice.setIdentity();
-            fDeviceToLocal.setIdentity();
+            // Can't transform in place and must still check transform result since some very
+            // ill-formed scale+translate matrices can cause invalid rrect radii.
+            SkRRect src;
+            if (fShape.rrect().transform(fLocalToDevice, &src)) {
+                fShape.rrect() = src;
+                fLocalToDevice.setIdentity();
+                fDeviceToLocal.setIdentity();
 
-            SkRect inner = SkRRectPriv::InnerBounds(fShape.rrect());
-            fInnerBounds = GrClip::GetPixelIBounds(inner, fAA, BoundsType::kInterior);
-            if (!fInnerBounds.intersect(deviceBounds)) {
-                fInnerBounds = SkIRect::MakeEmpty();
+                SkRect inner = SkRRectPriv::InnerBounds(fShape.rrect());
+                fInnerBounds = GrClip::GetPixelIBounds(inner, fAA, BoundsType::kInterior);
+                if (!fInnerBounds.intersect(deviceBounds)) {
+                    fInnerBounds = SkIRect::MakeEmpty();
+                }
             }
         }
     }
@@ -1241,7 +1256,7 @@ GrClip::PreClipResult GrClipStack::preApply(const SkRect& bounds, GrAA aa) const
     SkUNREACHABLE;
 }
 
-GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrRenderTargetContext* rtc,
+GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrSurfaceDrawContext* rtc,
                                   GrAAType aa, bool hasUserStencilSettings,
                                   GrAppliedClip* out, SkRect* bounds) const {
     // TODO: Once we no longer store SW masks, we don't need to sneak the provider in like this
@@ -1273,10 +1288,12 @@ GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrRenderTargetCon
     if (cs.shader()) {
         static const GrColorInfo kCoverageColorInfo{GrColorType::kUnknown, kPremul_SkAlphaType,
                                                     nullptr};
-        GrFPArgs args(context, *fMatrixProvider, kNone_SkFilterQuality, &kCoverageColorInfo);
+        GrFPArgs args(context, *fMatrixProvider, SkSamplingOptions(), &kCoverageColorInfo);
         clipFP = as_SB(cs.shader())->asFragmentProcessor(args);
         if (clipFP) {
-            clipFP = GrFragmentProcessor::SwizzleOutput(std::move(clipFP), GrSwizzle::AAAA());
+            // The initial input is the coverage from the geometry processor, so this ensures it
+            // is multiplied properly with the alpha of the clip shader.
+            clipFP = GrFragmentProcessor::MulInputByChildAlpha(std::move(clipFP));
         }
     }
 
@@ -1326,15 +1343,16 @@ GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrRenderTargetCon
     bool scissorIsNeeded = SkToBool(cs.shader());
 
     int remainingAnalyticFPs = kMaxAnalyticFPs;
-    if (rtc->numSamples() > 1 || aa == GrAAType::kMSAA || hasUserStencilSettings) {
-        // Disable analytic clips when we have MSAA. In MSAA we never conflate coverage and opacity.
+    if (hasUserStencilSettings) {
+        // Disable analytic clips when there are user stencil settings to ensure the clip is
+        // respected in the stencil buffer.
         remainingAnalyticFPs = 0;
-        // We disable MSAA when avoiding stencil so shouldn't get here.
+        // If we have user stencil settings, we shouldn't be avoiding the stencil buffer anyways.
         SkASSERT(!context->priv().caps()->avoidStencilBuffers());
     }
 
     // If window rectangles are supported, we can use them to exclude inner bounds of difference ops
-    int maxWindowRectangles = rtc->priv().maxWindowRectangles();
+    int maxWindowRectangles = rtc->maxWindowRectangles();
     GrWindowRectangles windowRects;
 
     // Elements not represented as an analytic FP or skipped will be collected here and later
@@ -1383,8 +1401,7 @@ GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrRenderTargetCon
                     fullyApplied = e.innerBounds() == e.outerBounds() ||
                                    e.innerBounds().contains(scissorBounds);
                 } else {
-                    if (!e.innerBounds().isEmpty() &&
-                        out->windowRectsState().numWindows() < maxWindowRectangles) {
+                    if (!e.innerBounds().isEmpty() && windowRects.count() < maxWindowRectangles) {
                         // TODO: If we have more difference ops than available window rects, we
                         // should prioritize those with the largest inner bounds.
                         windowRects.addWindow(e.innerBounds());
@@ -1399,14 +1416,20 @@ GrClip::Effect GrClipStack::apply(GrRecordingContext* context, GrRenderTargetCon
                     if (fullyApplied) {
                         remainingAnalyticFPs--;
                     } else if (ccpr && e.aa() == GrAA::kYes) {
-                        // While technically the element is turned into a mask, each atlas entry
-                        // counts towards the FP complexity of the clip.
-                        // TODO - CCPR needs a stable ops task ID so we can't create FPs until we
-                        // know any other mask generation is finished. It also only works with AA
-                        // shapes, future atlas systems can improve on this.
-                        elementsForAtlas.push_back(&e);
-                        remainingAnalyticFPs--;
-                        fullyApplied = true;
+                        constexpr static int64_t kMaxClipPathArea =
+                                GrCoverageCountingPathRenderer::kMaxClipPathArea;
+                        SkIRect maskBounds;
+                        if (maskBounds.intersect(e.outerBounds(), draw.outerBounds()) &&
+                            maskBounds.height64() * maskBounds.width64() < kMaxClipPathArea) {
+                            // While technically the element is turned into a mask, each atlas entry
+                            // counts towards the FP complexity of the clip.
+                            // TODO - CCPR needs a stable ops task ID so we can't create FPs until
+                            // we know any other mask generation is finished. It also only works
+                            // with AA shapes, future atlas systems can improve on this.
+                            elementsForAtlas.push_back(&e);
+                            remainingAnalyticFPs--;
+                            fullyApplied = true;
+                        }
                     }
                 }
 
@@ -1628,6 +1651,6 @@ GrFPResult GrClipStack::GetSWMaskFP(GrRecordingContext* context, Mask::Stack* ma
     fp = GrDeviceSpaceEffect::Make(std::move(fp));
 
     // Must combine the coverage sampled from the texture effect with the previous coverage
-    fp = GrBlendFragmentProcessor::Make(std::move(clipFP), std::move(fp), SkBlendMode::kModulate);
+    fp = GrBlendFragmentProcessor::Make(std::move(fp), std::move(clipFP), SkBlendMode::kDstIn);
     return GrFPSuccess(std::move(fp));
 }

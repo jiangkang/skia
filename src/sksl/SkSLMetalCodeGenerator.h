@@ -8,13 +8,16 @@
 #ifndef SKSL_METALCODEGENERATOR
 #define SKSL_METALCODEGENERATOR
 
+#include <set>
 #include <stack>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "include/private/SkSLProgramElement.h"
+#include "include/private/SkSLStatement.h"
 #include "src/sksl/SkSLCodeGenerator.h"
-#include "src/sksl/SkSLMemoryLayout.h"
+#include "src/sksl/SkSLOperators.h"
 #include "src/sksl/SkSLStringStream.h"
 #include "src/sksl/ir/SkSLBinaryExpression.h"
 #include "src/sksl/ir/SkSLBoolLiteral.h"
@@ -27,6 +30,7 @@
 #include "src/sksl/ir/SkSLFunctionCall.h"
 #include "src/sksl/ir/SkSLFunctionDeclaration.h"
 #include "src/sksl/ir/SkSLFunctionDefinition.h"
+#include "src/sksl/ir/SkSLFunctionPrototype.h"
 #include "src/sksl/ir/SkSLIfStatement.h"
 #include "src/sksl/ir/SkSLIndexExpression.h"
 #include "src/sksl/ir/SkSLInlineMarker.h"
@@ -34,21 +38,15 @@
 #include "src/sksl/ir/SkSLInterfaceBlock.h"
 #include "src/sksl/ir/SkSLPostfixExpression.h"
 #include "src/sksl/ir/SkSLPrefixExpression.h"
-#include "src/sksl/ir/SkSLProgramElement.h"
 #include "src/sksl/ir/SkSLReturnStatement.h"
 #include "src/sksl/ir/SkSLSetting.h"
-#include "src/sksl/ir/SkSLStatement.h"
 #include "src/sksl/ir/SkSLSwitchStatement.h"
 #include "src/sksl/ir/SkSLSwizzle.h"
 #include "src/sksl/ir/SkSLTernaryExpression.h"
 #include "src/sksl/ir/SkSLVarDeclarations.h"
-#include "src/sksl/ir/SkSLVarDeclarationsStatement.h"
 #include "src/sksl/ir/SkSLVariableReference.h"
-#include "src/sksl/ir/SkSLWhileStatement.h"
 
 namespace SkSL {
-
-#define kLast_Capability SpvCapabilityMultiViewport
 
 /**
  * Converts a Program into Metal code.
@@ -58,31 +56,10 @@ public:
     static constexpr const char* SAMPLER_SUFFIX = "Smplr";
     static constexpr const char* PACKED_PREFIX = "packed_";
 
-    enum Precedence {
-        kParentheses_Precedence    =  1,
-        kPostfix_Precedence        =  2,
-        kPrefix_Precedence         =  3,
-        kMultiplicative_Precedence =  4,
-        kAdditive_Precedence       =  5,
-        kShift_Precedence          =  6,
-        kRelational_Precedence     =  7,
-        kEquality_Precedence       =  8,
-        kBitwiseAnd_Precedence     =  9,
-        kBitwiseXor_Precedence     = 10,
-        kBitwiseOr_Precedence      = 11,
-        kLogicalAnd_Precedence     = 12,
-        kLogicalXor_Precedence     = 13,
-        kLogicalOr_Precedence      = 14,
-        kTernary_Precedence        = 15,
-        kAssignment_Precedence     = 16,
-        kSequence_Precedence       = 17,
-        kTopLevel_Precedence       = kSequence_Precedence
-    };
-
     MetalCodeGenerator(const Context* context, const Program* program, ErrorReporter* errors,
                       OutputStream* out)
     : INHERITED(program, errors, out)
-    , fReservedWords({"atan2", "rsqrt", "dfdx", "dfdy", "vertex", "fragment"})
+    , fReservedWords({"atan2", "rsqrt", "rint", "dfdx", "dfdy", "vertex", "fragment"})
     , fLineEnding("\n")
     , fContext(*context) {
         this->setupIntrinsics();
@@ -91,6 +68,8 @@ public:
     bool generateCode() override;
 
 protected:
+    using Precedence = Operator::Precedence;
+
     typedef int Requirements;
     static constexpr Requirements kNo_Requirements       = 0;
     static constexpr Requirements kInputs_Requirement    = 1 << 0;
@@ -100,23 +79,37 @@ protected:
     static constexpr Requirements kFragCoord_Requirement = 1 << 4;
 
     enum IntrinsicKind {
-        kSpecial_IntrinsicKind,
-        kMetal_IntrinsicKind,
+        kAtan_IntrinsicKind,
+        kBitcast_IntrinsicKind,
+        kBitCount_IntrinsicKind,
+        kCompareEqual_IntrinsicKind,
+        kCompareGreaterThan_IntrinsicKind,
+        kCompareGreaterThanEqual_IntrinsicKind,
+        kCompareLessThan_IntrinsicKind,
+        kCompareLessThanEqual_IntrinsicKind,
+        kCompareNotEqual_IntrinsicKind,
+        kDegrees_IntrinsicKind,
+        kDFdx_IntrinsicKind,
+        kDFdy_IntrinsicKind,
+        kDistance_IntrinsicKind,
+        kDot_IntrinsicKind,
+        kFaceforward_IntrinsicKind,
+        kFindLSB_IntrinsicKind,
+        kFindMSB_IntrinsicKind,
+        kInverse_IntrinsicKind,
+        kInversesqrt_IntrinsicKind,
+        kLength_IntrinsicKind,
+        kMatrixCompMult_IntrinsicKind,
+        kMod_IntrinsicKind,
+        kNormalize_IntrinsicKind,
+        kRadians_IntrinsicKind,
+        kReflect_IntrinsicKind,
+        kRefract_IntrinsicKind,
+        kRoundEven_IntrinsicKind,
+        kTexture_IntrinsicKind,
     };
 
-    enum SpecialIntrinsic {
-        kTexture_SpecialIntrinsic,
-        kMod_SpecialIntrinsic,
-    };
-
-    enum MetalIntrinsic {
-        kEqual_MetalIntrinsic,
-        kNotEqual_MetalIntrinsic,
-        kLessThan_MetalIntrinsic,
-        kLessThanEqual_MetalIntrinsic,
-        kGreaterThan_MetalIntrinsic,
-        kGreaterThanEqual_MetalIntrinsic,
-    };
+    static const char* OperatorName(Operator op);
 
     class GlobalStructVisitor;
     void visitGlobalStruct(GlobalStructVisitor* visitor);
@@ -133,6 +126,8 @@ protected:
 
     void writeLine(const String& s);
 
+    void finishLine();
+
     void writeHeader();
 
     void writeUniformStruct();
@@ -143,6 +138,8 @@ protected:
 
     void writeInterfaceBlocks();
 
+    void writeStructDefinitions();
+
     void writeFields(const std::vector<Type::Field>& fields, int parentOffset,
                      const InterfaceBlock* parentIntf = nullptr);
 
@@ -151,11 +148,14 @@ protected:
     int alignment(const Type* type, bool isPacked) const;
 
     void writeGlobalStruct();
+
     void writeGlobalInit();
 
     void writePrecisionModifier();
 
     String typeName(const Type& type);
+
+    void writeStructDefinition(const StructDefinition& s);
 
     void writeType(const Type& type);
 
@@ -165,9 +165,16 @@ protected:
 
     void writeFunctionStart(const FunctionDeclaration& f);
 
-    void writeFunctionDeclaration(const FunctionDeclaration& f);
+    void writeFunctionRequirementParams(const FunctionDeclaration& f,
+                                        const char*& separator);
+
+    void writeFunctionRequirementArgs(const FunctionDeclaration& f, const char*& separator);
+
+    bool writeFunctionDeclaration(const FunctionDeclaration& f);
 
     void writeFunction(const FunctionDefinition& f);
+
+    void writeFunctionPrototype(const FunctionPrototype& f);
 
     void writeLayout(const Layout& layout);
 
@@ -177,7 +184,7 @@ protected:
 
     void writeName(const String& name);
 
-    void writeVarDeclarations(const VarDeclarations& decl, bool global);
+    void writeVarDeclaration(const VarDeclaration& decl, bool global);
 
     void writeFragCoord();
 
@@ -185,23 +192,38 @@ protected:
 
     void writeExpression(const Expression& expr, Precedence parentPrecedence);
 
-    void writeIntrinsicCall(const FunctionCall& c);
-
     void writeMinAbsHack(Expression& absExpr, Expression& otherExpr);
 
-    void writeFunctionCall(const FunctionCall& c);
+    String getOutParamHelper(const FunctionCall& c,
+                             const ExpressionArray& arguments,
+                             const SkTArray<VariableReference*>& outVars);
 
-    void writeInverseHack(const Expression& mat);
+    String getInversePolyfill(const ExpressionArray& arguments);
+
+    String getBitcastIntrinsic(const Type& outType);
+
+    String getTempVariable(const Type& varType);
+
+    void writeFunctionCall(const FunctionCall& c);
 
     bool matrixConstructHelperIsNeeded(const Constructor& c);
     String getMatrixConstructHelper(const Constructor& c);
     void assembleMatrixFromMatrix(const Type& sourceMatrix, int rows, int columns);
-    void assembleMatrixFromExpressions(const std::vector<std::unique_ptr<Expression>>& args,
-                                       int rows, int columns);
+    void assembleMatrixFromExpressions(const ExpressionArray& args, int rows, int columns);
+
+    void writeMatrixCompMult();
 
     void writeMatrixTimesEqualHelper(const Type& left, const Type& right, const Type& result);
 
-    void writeSpecialIntrinsic(const FunctionCall& c, SpecialIntrinsic kind);
+    void writeMatrixEqualityHelper(const Type& left, const Type& right);
+
+    void writeMatrixInequalityHelper(const Type& left, const Type& right);
+
+    void writeArgumentList(const ExpressionArray& arguments);
+
+    void writeSimpleIntrinsic(const FunctionCall& c);
+
+    void writeIntrinsicCall(const FunctionCall& c, IntrinsicKind kind);
 
     bool canCoerce(const Type& t1, const Type& t2);
 
@@ -210,8 +232,6 @@ protected:
     void writeFieldAccess(const FieldAccess& f);
 
     void writeSwizzle(const Swizzle& swizzle);
-
-    static Precedence GetBinaryPrecedence(Token::Kind op);
 
     void writeBinaryExpression(const BinaryExpression& b, Precedence parentPrecedence);
 
@@ -233,7 +253,7 @@ protected:
 
     void writeStatement(const Statement& s);
 
-    void writeStatements(const std::vector<std::unique_ptr<Statement>>& statements);
+    void writeStatements(const StatementArray& statements);
 
     void writeBlock(const Block& b);
 
@@ -241,11 +261,11 @@ protected:
 
     void writeForStatement(const ForStatement& f);
 
-    void writeWhileStatement(const WhileStatement& w);
-
     void writeDoStatement(const DoStatement& d);
 
     void writeSwitchStatement(const SwitchStatement& s);
+
+    void writeReturnStatementFromMain();
 
     void writeReturnStatement(const ReturnStatement& r);
 
@@ -257,8 +277,11 @@ protected:
 
     Requirements requirements(const Statement* s);
 
-    typedef std::pair<IntrinsicKind, int32_t> Intrinsic;
-    std::unordered_map<String, Intrinsic> fIntrinsicMap;
+    int getUniformBinding(const Modifiers& m);
+
+    int getUniformSet(const Modifiers& m);
+
+    std::unordered_map<String, IntrinsicKind> fIntrinsicMap;
     std::unordered_set<String> fReservedWords;
     std::unordered_map<const Type::Field*, const InterfaceBlock*> fInterfaceBlockMap;
     std::unordered_map<const InterfaceBlock*, String> fInterfaceBlockNameMap;
@@ -266,17 +289,11 @@ protected:
     int fPaddingCount = 0;
     const char* fLineEnding;
     const Context& fContext;
-    StringStream fHeader;
     String fFunctionHeader;
     StringStream fExtraFunctions;
-    Program::Kind fProgramKind;
     int fVarCount = 0;
     int fIndentation = 0;
     bool fAtLineStart = false;
-    // Keeps track of which struct types we have written. Given that we are unlikely to ever write
-    // more than one or two structs per shader, a simple linear search will be faster than anything
-    // fancier.
-    std::vector<const Type*> fWrittenStructs;
     std::set<String> fWrittenIntrinsics;
     // true if we have run into usages of dFdx / dFdy
     bool fFoundDerivatives = false;
@@ -286,6 +303,9 @@ protected:
     std::unordered_set<String> fHelpers;
     int fUniformBuffer = -1;
     String fRTHeightName;
+    const FunctionDeclaration* fCurrentFunction = nullptr;
+    int fSwizzleHelperCount = 0;
+    bool fIgnoreVariableReferenceModifiers = false;
 
     using INHERITED = CodeGenerator;
 };

@@ -15,6 +15,7 @@
 #include "include/core/SkPoint.h"
 #include "include/core/SkStream.h"
 #include "include/private/SkTArray.h"
+#include "include/private/SkTPin.h"
 #include "include/private/SkTo.h"
 #include "modules/skottie/include/ExternalLayer.h"
 #include "modules/skottie/include/SkottieProperty.h"
@@ -471,7 +472,7 @@ void Animation::render(SkCanvas* canvas, const SkRect* dstR, RenderFlags renderF
 
     const SkRect srcR = SkRect::MakeSize(this->size());
     if (dstR) {
-        canvas->concat(SkMatrix::MakeRectToRect(srcR, *dstR, SkMatrix::kCenter_ScaleToFit));
+        canvas->concat(SkMatrix::RectToRect(srcR, *dstR, SkMatrix::kCenter_ScaleToFit));
     }
 
     if (!(renderFlags & RenderFlag::kDisableTopLevelClipping)) {

@@ -143,7 +143,8 @@ public:
     sk_sp<FontCollection> fontCollection() const { return fFontCollection; }
     void formatLines(SkScalar maxWidth);
     void ensureUTF16Mapping();
-    TextIndex findGraphemeStart(TextIndex index);
+    TextIndex findNextGraphemeBoundary(TextIndex utf8);
+    TextIndex findPreviousGraphemeBoundary(TextIndex utf8);
     size_t getUTF16Index(TextIndex index) {
         return fUTF16IndexForUTF8Index[index];
     }
@@ -219,6 +220,7 @@ public:
     using CodeUnitRangeVisitor = std::function<bool(TextRange textRange)>;
     void forEachCodeUnitPropertyRange(CodeUnitFlags property, CodeUnitRangeVisitor visitor);
     size_t getWhitespacesLength(TextRange textRange);
+    bool isSpace(TextRange textRange);
 
     bool codeUnitHasProperty(size_t index, CodeUnitFlags property) const { return (fCodeUnitProperties[index] & property) == property; }
 

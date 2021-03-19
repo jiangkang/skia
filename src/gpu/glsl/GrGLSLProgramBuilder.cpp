@@ -19,6 +19,7 @@
 #include "src/gpu/glsl/GrGLSLVarying.h"
 #include "src/gpu/glsl/GrGLSLXferProcessor.h"
 #include "src/sksl/SkSLCompiler.h"
+#include "src/sksl/dsl/priv/DSLFPs.h"
 
 const int GrGLSLProgramBuilder::kVarsPerBlock = 8;
 
@@ -35,6 +36,8 @@ GrGLSLProgramBuilder::GrGLSLProgramBuilder(GrRenderTarget* renderTarget,
         , fGeometryProcessor(nullptr)
         , fXferProcessor(nullptr)
         , fNumFragmentSamplers(0) {}
+
+GrGLSLProgramBuilder::~GrGLSLProgramBuilder() = default;
 
 void GrGLSLProgramBuilder::addFeature(GrShaderFlags shaders,
                                       uint32_t featureBit,
@@ -54,12 +57,14 @@ void GrGLSLProgramBuilder::addFeature(GrShaderFlags shaders,
 bool GrGLSLProgramBuilder::emitAndInstallProcs() {
     // First we loop over all of the installed processors and collect coord transforms.  These will
     // be sent to the GrGLSLPrimitiveProcessor in its emitCode function
+    SkSL::dsl::Start(this->shaderCompiler());
     SkString inputColor;
     SkString inputCoverage;
     this->emitAndInstallPrimProc(&inputColor, &inputCoverage);
     this->emitAndInstallFragProcs(&inputColor, &inputCoverage);
     this->emitAndInstallXferProc(inputColor, inputCoverage);
     fGeometryProcessor->emitTransformCode(&fVS, this->uniformHandler());
+    SkSL::dsl::End();
 
     return this->checkSamplerCounts();
 }
@@ -83,13 +88,8 @@ void GrGLSLProgramBuilder::emitAndInstallPrimProc(SkString* outputColor, SkStrin
     }
     fUniformHandles.fRTAdjustmentUni = this->uniformHandler()->addUniform(
             nullptr, rtAdjustVisibility, kFloat4_GrSLType, SkSL::Compiler::RTADJUST_NAME);
-    const char* rtAdjustName =
-        this->uniformHandler()->getUniformCStr(fUniformHandles.fRTAdjustmentUni);
 
-    // Enclose custom code in a block to avoid namespace conflicts
-    SkString openBrace;
-    openBrace.printf("{ // Stage %d, %s\n", fStageIndex, proc.name());
-    fFS.codeAppend(openBrace.c_str());
+    fFS.codeAppendf("// Stage %d, %s\n", fStageIndex, proc.name());
     fVS.codeAppendf("// Primitive Processor %s\n", proc.name());
 
     SkASSERT(!fGeometryProcessor);
@@ -117,7 +117,6 @@ void GrGLSLProgramBuilder::emitAndInstallPrimProc(SkString* outputColor, SkStrin
                                            proc,
                                            outputColor->c_str(),
                                            outputCoverage->c_str(),
-                                           rtAdjustName,
                                            texSamplers.get(),
                                            &transformHandler);
     fGeometryProcessor->emitCode(args);
@@ -125,20 +124,22 @@ void GrGLSLProgramBuilder::emitAndInstallPrimProc(SkString* outputColor, SkStrin
     // We have to check that effects and the code they emit are consistent, ie if an effect
     // asks for dst color, then the emit code needs to follow suit
     SkDEBUGCODE(verify(proc);)
-
-    fFS.codeAppend("}");
 }
 
 void GrGLSLProgramBuilder::emitAndInstallFragProcs(SkString* color, SkString* coverage) {
     int transformedCoordVarsIdx = 0;
     int fpCount = this->pipeline().numFragmentProcessors();
-    fFragmentProcessors = std::make_unique<std::unique_ptr<GrGLSLFragmentProcessor>[]>(fpCount);
+    SkASSERT(fFPImpls.empty());
+    fFPImpls.reserve(fpCount);
     for (int i = 0; i < fpCount; ++i) {
         SkString* inOut = this->pipeline().isColorFragmentProcessor(i) ? color : coverage;
         SkString output;
         const GrFragmentProcessor& fp = this->pipeline().getFragmentProcessor(i);
-        fFragmentProcessors[i] = std::unique_ptr<GrGLSLFragmentProcessor>(fp.createGLSLInstance());
-        output = this->emitFragProc(fp, *fFragmentProcessors[i], transformedCoordVarsIdx, *inOut,
+        fFPImpls.push_back(fp.makeProgramImpl());
+        output = this->emitFragProc(fp,
+                                    *fFPImpls.back(),
+                                    transformedCoordVarsIdx,
+                                    *inOut,
                                     output);
         for (const auto& subFP : GrFragmentProcessor::FPRange(fp)) {
             transformedCoordVarsIdx += subFP.numVaryingCoordsUsed();
@@ -156,6 +157,7 @@ SkString GrGLSLProgramBuilder::emitFragProc(const GrFragmentProcessor& fp,
     // Program builders have a bit of state we need to clear with each effect
     AutoStageAdvance adv(this);
     this->nameExpression(&output, "output");
+    fFS.codeAppendf("half4 %s;", output.c_str());
 
     int samplerIdx = 0;
     for (auto [subFP, subGLSLFP] : GrGLSLFragmentProcessor::ParallelRange(fp, glslFP)) {
@@ -176,54 +178,14 @@ SkString GrGLSLProgramBuilder::emitFragProc(const GrFragmentProcessor& fp,
                                            this->uniformHandler(),
                                            this->shaderCaps(),
                                            fp,
-                                           output.c_str(),
-                                           input.c_str(),
+                                           "_input",
                                            "_coords",
-                                           coords,
-                                           /*forceInline=*/true);
+                                           coords);
+    auto name = fFS.writeProcessorFunction(&glslFP, args);
+    fFS.codeAppendf("%s = %s(%s);", output.c_str(), name.c_str(), input.c_str());
 
-    if (fp.usesExplicitReturn()) {
-        // FPs that explicitly return their output color must be in a helper function, but we inline
-        // it if at all possible.
-        args.fInputColor = "_input";
-        args.fOutputColor = "_output";
-        auto name = fFS.writeProcessorFunction(&glslFP, args);
-        fFS.codeAppendf("%s = %s(%s);", output.c_str(), name.c_str(), input.c_str());
-    } else {
-        // Enclose custom code in a block to avoid namespace conflicts
-        fFS.codeAppendf("{ // Stage %d, %s\n", fStageIndex, fp.name());
-
-        if (fp.referencesSampleCoords()) {
-            // The fp's generated code expects a _coords variable, but we're at the root so _coords
-            // is just the local coordinates produced by the primitive processor.
-            SkASSERT(fp.usesVaryingCoordsDirectly());
-
-            const GrShaderVar& varying = coordVars[0];
-            switch(varying.getType()) {
-                case kFloat2_GrSLType:
-                    fFS.codeAppendf("float2 %s = %s.xy;\n",
-                                    args.fSampleCoord, varying.getName().c_str());
-                    break;
-                case kFloat3_GrSLType:
-                    fFS.codeAppendf("float2 %s = %s.xy / %s.z;\n",
-                                    args.fSampleCoord,
-                                    varying.getName().c_str(),
-                                    varying.getName().c_str());
-                    break;
-                default:
-                    SkDEBUGFAILF("Unexpected type for varying: %d named %s\n",
-                                (int) varying.getType(), varying.getName().c_str());
-                    break;
-            }
-        }
-
-        glslFP.emitCode(args);
-
-        fFS.codeAppend("}");
-    }
-
-    // We have to check that effects and the code they emit are consistent, ie if an effect
-    // asks for dst color, then the emit code needs to follow suit
+    // We have to check that effects and the code they emit are consistent, ie if an effect asks
+    // for dst color, then the emit code needs to follow suit
     SkDEBUGCODE(verify(fp);)
 
     return output;
@@ -329,33 +291,28 @@ void GrGLSLProgramBuilder::verify(const GrXferProcessor& xp) {
 }
 #endif
 
-void GrGLSLProgramBuilder::nameVariable(SkString* out, char prefix, const char* name, bool mangle) {
+SkString GrGLSLProgramBuilder::nameVariable(char prefix, const char* name, bool mangle) {
+    SkString out;
     if ('\0' == prefix) {
-        *out = name;
+        out = name;
     } else {
-        out->printf("%c%s", prefix, name);
+        out.printf("%c%s", prefix, name);
     }
     if (mangle) {
-        if (out->endsWith('_')) {
-            // Names containing "__" are reserved.
-            out->append("x");
-        }
-        out->appendf("_Stage%d%s", fStageIndex, fFS.getMangleString().c_str());
+        // Names containing "__" are reserved; add "x" if needed to avoid consecutive underscores.
+        const char *underscoreSplitter = out.endsWith('_') ? "x" : "";
+
+        out.appendf("%s_Stage%d%s", underscoreSplitter, fStageIndex, fFS.getMangleString().c_str());
     }
+    return out;
 }
 
 void GrGLSLProgramBuilder::nameExpression(SkString* output, const char* baseName) {
-    // create var to hold stage result.  If we already have a valid output name, just use that
-    // otherwise create a new mangled one.  This name is only valid if we are reordering stages
-    // and have to tell stage exactly where to put its output.
-    SkString outName;
-    if (output->size()) {
-        outName = output->c_str();
-    } else {
-        this->nameVariable(&outName, '\0', baseName);
+    // Name a variable to hold stage result. If we already have a valid output name, use that as-is;
+    // otherwise, create a new mangled one.
+    if (output->isEmpty()) {
+        *output = this->nameVariable(/*prefix=*/'\0', baseName);
     }
-    fFS.codeAppendf("half4 %s;", outName.c_str());
-    *output = outName;
 }
 
 void GrGLSLProgramBuilder::appendUniformDecls(GrShaderFlags visibility, SkString* out) const {

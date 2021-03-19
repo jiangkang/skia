@@ -10,24 +10,28 @@
  **************************************************************************************************/
 #include "GrRRectBlurEffect.h"
 
+#include "include/gpu/GrDirectContext.h"
 #include "include/gpu/GrRecordingContext.h"
 #include "src/core/SkAutoMalloc.h"
-#include "src/core/SkBlurPriv.h"
 #include "src/core/SkGpuBlurUtils.h"
 #include "src/core/SkRRectPriv.h"
+#include "src/gpu/GrBitmapTextureMaker.h"
 #include "src/gpu/GrCaps.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrPaint.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
 #include "src/gpu/GrStyle.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
+#include "src/gpu/GrThreadSafeCache.h"
 #include "src/gpu/effects/GrTextureEffect.h"
 
-static constexpr auto kBlurredRRectMaskOrigin = kBottomLeft_GrSurfaceOrigin;
+static constexpr auto kBlurredRRectMaskOrigin = kTopLeft_GrSurfaceOrigin;
 
 static void make_blurred_rrect_key(GrUniqueKey* key,
                                    const SkRRect& rrectToDraw,
                                    float xformedSigma) {
+    SkASSERT(!SkGpuBlurUtils::IsEffectivelyZeroSigma(xformedSigma));
     static const GrUniqueKey::Domain kDomain = GrUniqueKey::GenerateDomain();
 
     GrUniqueKey::Builder builder(key, kDomain, 9, "RoundRect Blur Mask");
@@ -35,8 +39,10 @@ static void make_blurred_rrect_key(GrUniqueKey* key,
 
     int index = 1;
     // TODO: this is overkill for _simple_ circular rrects
-    for (auto c : {SkRRect::kUpperLeft_Corner, SkRRect::kUpperRight_Corner,
-                   SkRRect::kLowerRight_Corner, SkRRect::kLowerLeft_Corner}) {
+    for (auto c : {SkRRect::kUpperLeft_Corner,
+                   SkRRect::kUpperRight_Corner,
+                   SkRRect::kLowerRight_Corner,
+                   SkRRect::kLowerLeft_Corner}) {
         SkASSERT(SkScalarIsInt(rrectToDraw.radii(c).fX) && SkScalarIsInt(rrectToDraw.radii(c).fY));
         builder[index++] = SkScalarCeilToInt(rrectToDraw.radii(c).fX);
         builder[index++] = SkScalarCeilToInt(rrectToDraw.radii(c).fY);
@@ -44,29 +50,40 @@ static void make_blurred_rrect_key(GrUniqueKey* key,
     builder.finish();
 }
 
-static GrSurfaceProxyView create_mask_on_gpu(GrRecordingContext* context,
-                                             const SkRRect& rrectToDraw,
-                                             const SkISize& dimensions,
-                                             float xformedSigma) {
-    auto rtc = GrRenderTargetContext::MakeWithFallback(
-            context, GrColorType::kAlpha_8, nullptr, SkBackingFit::kExact, dimensions, 1,
-            GrMipmapped::kNo, GrProtected::kNo, kBlurredRRectMaskOrigin);
+static bool fillin_view_on_gpu(GrDirectContext* dContext,
+                               const GrSurfaceProxyView& lazyView,
+                               sk_sp<GrThreadSafeCache::Trampoline> trampoline,
+                               const SkRRect& rrectToDraw,
+                               const SkISize& dimensions,
+                               float xformedSigma) {
+    SkASSERT(!SkGpuBlurUtils::IsEffectivelyZeroSigma(xformedSigma));
+    std::unique_ptr<GrSurfaceDrawContext> rtc =
+            GrSurfaceDrawContext::MakeWithFallback(dContext,
+                                                   GrColorType::kAlpha_8,
+                                                   nullptr,
+                                                   SkBackingFit::kExact,
+                                                   dimensions,
+                                                   1,
+                                                   GrMipmapped::kNo,
+                                                   GrProtected::kNo,
+                                                   kBlurredRRectMaskOrigin);
     if (!rtc) {
-        return {};
+        return false;
     }
 
     GrPaint paint;
 
     rtc->clear(SK_PMColor4fTRANSPARENT);
-    rtc->drawRRect(nullptr, std::move(paint), GrAA::kYes, SkMatrix::I(), rrectToDraw,
+    rtc->drawRRect(nullptr,
+                   std::move(paint),
+                   GrAA::kYes,
+                   SkMatrix::I(),
+                   rrectToDraw,
                    GrStyle::SimpleFill());
 
     GrSurfaceProxyView srcView = rtc->readSurfaceView();
-    if (!srcView) {
-        return {};
-    }
     SkASSERT(srcView.asTextureProxy());
-    auto rtc2 = SkGpuBlurUtils::GaussianBlur(context,
+    auto rtc2 = SkGpuBlurUtils::GaussianBlur(dContext,
                                              std::move(srcView),
                                              rtc->colorInfo().colorType(),
                                              rtc->colorInfo().alphaType(),
@@ -77,17 +94,16 @@ static GrSurfaceProxyView create_mask_on_gpu(GrRecordingContext* context,
                                              xformedSigma,
                                              SkTileMode::kClamp,
                                              SkBackingFit::kExact);
-    if (!rtc2) {
-        return {};
+    if (!rtc2 || !rtc2->readSurfaceView()) {
+        return false;
     }
 
-    return rtc2->readSurfaceView();
-}
+    auto view = rtc2->readSurfaceView();
+    SkASSERT(view.swizzle() == lazyView.swizzle());
+    SkASSERT(view.origin() == lazyView.origin());
+    trampoline->fProxy = view.asTextureProxyRef();
 
-// TODO: merge w/ copy in SkGpuBlurUtils.cpp
-static int sigma_radius(float sigma) {
-    SkASSERT(sigma >= 0);
-    return static_cast<int>(ceilf(sigma * 3.0f));
+    return true;
 }
 
 // Evaluate the vertical blur at the specified 'y' value given the location of the top of the
@@ -140,11 +156,12 @@ static uint8_t eval_H(int x,
 
 // Create a cpu-side blurred-rrect mask that is close to the version the gpu would've produced.
 // The match needs to be close bc the cpu- and gpu-generated version must be interchangeable.
-static GrSurfaceProxyView create_mask_on_cpu(GrRecordingContext* context,
+static GrSurfaceProxyView create_mask_on_cpu(GrRecordingContext* rContext,
                                              const SkRRect& rrectToDraw,
                                              const SkISize& dimensions,
                                              float xformedSigma) {
-    int radius = sigma_radius(xformedSigma);
+    SkASSERT(!SkGpuBlurUtils::IsEffectivelyZeroSigma(xformedSigma));
+    int radius = SkGpuBlurUtils::SigmaRadius(xformedSigma);
     int kernelSize = 2 * radius + 1;
 
     SkASSERT(kernelSize % 2);
@@ -159,10 +176,10 @@ static GrSurfaceProxyView create_mask_on_cpu(GrRecordingContext* context,
 
     std::unique_ptr<float[]> kernel(new float[kernelSize]);
 
-    SkFillIn1DGaussianKernel(kernel.get(), xformedSigma, radius);
+    SkGpuBlurUtils::Compute1DGaussianKernel(kernel.get(), xformedSigma, radius);
 
     SkBitmap integral;
-    if (!SkCreateIntegralTable(6 * xformedSigma, &integral)) {
+    if (!SkGpuBlurUtils::CreateIntegralTable(6 * xformedSigma, &integral)) {
         return {};
     }
 
@@ -192,8 +209,14 @@ static GrSurfaceProxyView create_mask_on_cpu(GrRecordingContext* context,
         uint8_t* scanline = result.getAddr8(0, y);
 
         for (int x = 0; x < halfWidthPlus1; ++x) {
-            scanline[x] = eval_H(x, y, topVec, kernel.get(), kernelSize, integral.getAddr8(0, 0),
-                                 integral.width(), 6 * xformedSigma);
+            scanline[x] = eval_H(x,
+                                 y,
+                                 topVec,
+                                 kernel.get(),
+                                 kernelSize,
+                                 integral.getAddr8(0, 0),
+                                 integral.width(),
+                                 6 * xformedSigma);
             scanline[dimensions.width() - x - 1] = scanline[x];
         }
 
@@ -202,27 +225,26 @@ static GrSurfaceProxyView create_mask_on_cpu(GrRecordingContext* context,
 
     result.setImmutable();
 
-    GrProxyProvider* proxyProvider = context->priv().proxyProvider();
-
-    sk_sp<GrTextureProxy> proxy = proxyProvider->createProxyFromBitmap(
-            result, GrMipmapped::kNo, SkBackingFit::kExact, SkBudgeted::kYes);
-    if (!proxy) {
+    GrBitmapTextureMaker maker(rContext, result, GrImageTexGenPolicy::kNew_Uncached_Budgeted);
+    auto view = maker.view(GrMipmapped::kNo);
+    if (!view) {
         return {};
     }
 
-    GrSwizzle swizzle =
-            context->priv().caps()->getReadSwizzle(proxy->backendFormat(), GrColorType::kAlpha_8);
-    return {std::move(proxy), kBlurredRRectMaskOrigin, swizzle};
+    SkASSERT(view.origin() == kBlurredRRectMaskOrigin);
+    return view;
 }
 
 static std::unique_ptr<GrFragmentProcessor> find_or_create_rrect_blur_mask_fp(
-        GrRecordingContext* context,
+        GrRecordingContext* rContext,
         const SkRRect& rrectToDraw,
         const SkISize& dimensions,
         float xformedSigma) {
+    SkASSERT(!SkGpuBlurUtils::IsEffectivelyZeroSigma(xformedSigma));
     GrUniqueKey key;
-
     make_blurred_rrect_key(&key, rrectToDraw, xformedSigma);
+
+    auto threadSafeCache = rContext->priv().threadSafeCache();
 
     // It seems like we could omit this matrix and modify the shader code to not normalize
     // the coords used to sample the texture effect. However, the "proxyDims" value in the
@@ -231,27 +253,58 @@ static std::unique_ptr<GrFragmentProcessor> find_or_create_rrect_blur_mask_fp(
     // SkComputeBlurredRRectParams whereas the shader code uses the float radius to compute
     // 'proxyDims'. Why it draws correctly with these unequal values is a mystery for the ages.
     auto m = SkMatrix::Scale(dimensions.width(), dimensions.height());
-    GrProxyProvider* proxyProvider = context->priv().proxyProvider();
 
-    if (auto view = proxyProvider->findCachedProxyWithColorTypeFallback(
-                key, kBlurredRRectMaskOrigin, GrColorType::kAlpha_8, 1)) {
-        return GrTextureEffect::Make(std::move(view), kPremul_SkAlphaType, m);
-    }
+    GrSurfaceProxyView view;
 
-    GrSurfaceProxyView mask;
-    if (proxyProvider->isDDLProvider() == GrDDLProvider::kNo) {
-        mask = create_mask_on_gpu(context, rrectToDraw, dimensions, xformedSigma);
+    if (GrDirectContext* dContext = rContext->asDirectContext()) {
+        // The gpu thread gets priority over the recording threads. If the gpu thread is first,
+        // it crams a lazy proxy into the cache and then fills it in later.
+        auto[lazyView, trampoline] = GrThreadSafeCache::CreateLazyView(dContext,
+                                                                       GrColorType::kAlpha_8,
+                                                                       dimensions,
+                                                                       kBlurredRRectMaskOrigin,
+                                                                       SkBackingFit::kExact);
+        if (!lazyView) {
+            return nullptr;
+        }
+
+        view = threadSafeCache->findOrAdd(key, lazyView);
+        if (view != lazyView) {
+            SkASSERT(view.asTextureProxy());
+            SkASSERT(view.origin() == kBlurredRRectMaskOrigin);
+            return GrTextureEffect::Make(std::move(view), kPremul_SkAlphaType, m);
+        }
+
+        if (!fillin_view_on_gpu(dContext,
+                                lazyView,
+                                std::move(trampoline),
+                                rrectToDraw,
+                                dimensions,
+                                xformedSigma)) {
+            // In this case something has gone disastrously wrong so set up to drop the draw
+            // that needed this resource and reduce future pollution of the cache.
+            threadSafeCache->remove(key);
+            return nullptr;
+        }
     } else {
-        mask = create_mask_on_cpu(context, rrectToDraw, dimensions, xformedSigma);
-    }
-    if (!mask) {
-        return nullptr;
+        view = threadSafeCache->find(key);
+        if (view) {
+            SkASSERT(view.asTextureProxy());
+            SkASSERT(view.origin() == kBlurredRRectMaskOrigin);
+            return GrTextureEffect::Make(std::move(view), kPremul_SkAlphaType, m);
+        }
+
+        view = create_mask_on_cpu(rContext, rrectToDraw, dimensions, xformedSigma);
+        if (!view) {
+            return nullptr;
+        }
+
+        view = threadSafeCache->add(key, view);
     }
 
-    SkASSERT(mask.asTextureProxy());
-    SkASSERT(mask.origin() == kBlurredRRectMaskOrigin);
-    proxyProvider->assignUniqueKeyToProxy(key, mask.asTextureProxy());
-    return GrTextureEffect::Make(std::move(mask), kPremul_SkAlphaType, m);
+    SkASSERT(view.asTextureProxy());
+    SkASSERT(view.origin() == kBlurredRRectMaskOrigin);
+    return GrTextureEffect::Make(std::move(view), kPremul_SkAlphaType, m);
 }
 
 std::unique_ptr<GrFragmentProcessor> GrRRectBlurEffect::Make(
@@ -261,12 +314,26 @@ std::unique_ptr<GrFragmentProcessor> GrRRectBlurEffect::Make(
         float xformedSigma,
         const SkRRect& srcRRect,
         const SkRRect& devRRect) {
-    SkASSERT(!SkRRectPriv::IsCircle(devRRect) &&
-             !devRRect.isRect());  // Should've been caught up-stream
-
+// Should've been caught up-stream
+#ifdef SK_DEBUG
+    SkASSERTF(!SkRRectPriv::IsCircle(devRRect),
+              "Unexpected circle. %d\n\t%s\n\t%s",
+              SkRRectPriv::IsCircle(srcRRect),
+              srcRRect.dumpToString(true).c_str(),
+              devRRect.dumpToString(true).c_str());
+    SkASSERTF(!devRRect.isRect(),
+              "Unexpected rect. %d\n\t%s\n\t%s",
+              srcRRect.isRect(),
+              srcRRect.dumpToString(true).c_str(),
+              devRRect.dumpToString(true).c_str());
+#endif
     // TODO: loosen this up
     if (!SkRRectPriv::IsSimpleCircular(devRRect)) {
         return nullptr;
+    }
+
+    if (SkGpuBlurUtils::IsEffectivelyZeroSigma(xformedSigma)) {
+        return inputFP;
     }
 
     // Make sure we can successfully ninepatch this rrect -- the blur sigma has to be
@@ -274,11 +341,18 @@ std::unique_ptr<GrFragmentProcessor> GrRRectBlurEffect::Make(
     // width (and height) of the rrect.
     SkRRect rrectToDraw;
     SkISize dimensions;
-    SkScalar ignored[kSkBlurRRectMaxDivisions];
+    SkScalar ignored[SkGpuBlurUtils::kBlurRRectMaxDivisions];
 
-    bool ninePatchable =
-            SkComputeBlurredRRectParams(srcRRect, devRRect, sigma, xformedSigma, &rrectToDraw,
-                                        &dimensions, ignored, ignored, ignored, ignored);
+    bool ninePatchable = SkGpuBlurUtils::ComputeBlurredRRectParams(srcRRect,
+                                                                   devRRect,
+                                                                   sigma,
+                                                                   xformedSigma,
+                                                                   &rrectToDraw,
+                                                                   &dimensions,
+                                                                   ignored,
+                                                                   ignored,
+                                                                   ignored,
+                                                                   ignored);
     if (!ninePatchable) {
         return nullptr;
     }
@@ -290,8 +364,11 @@ std::unique_ptr<GrFragmentProcessor> GrRRectBlurEffect::Make(
     }
 
     return std::unique_ptr<GrFragmentProcessor>(
-            new GrRRectBlurEffect(std::move(inputFP), xformedSigma, devRRect.getBounds(),
-                                  SkRRectPriv::GetSimpleRadii(devRRect).fX, std::move(maskFP)));
+            new GrRRectBlurEffect(std::move(inputFP),
+                                  xformedSigma,
+                                  devRRect.getBounds(),
+                                  SkRRectPriv::GetSimpleRadii(devRRect).fX,
+                                  std::move(maskFP)));
 }
 #include "src/core/SkUtils.h"
 #include "src/gpu/GrTexture.h"
@@ -313,42 +390,39 @@ public:
         (void)rect;
         auto cornerRadius = _outer.cornerRadius;
         (void)cornerRadius;
-        cornerRadiusVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                           kHalf_GrSLType, "cornerRadius");
-        proxyRectVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                        kFloat4_GrSLType, "proxyRect");
-        blurRadiusVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                         kHalf_GrSLType, "blurRadius");
+        cornerRadiusVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kHalf_GrSLType, "cornerRadius");
+        proxyRectVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kFloat4_GrSLType, "proxyRect");
+        blurRadiusVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kHalf_GrSLType, "blurRadius");
         fragBuilder->codeAppendf(
-                R"SkSL(half2 translatedFragPos = half2(sk_FragCoord.xy - %s.xy);
-half2 proxyCenter = half2((%s.zw - %s.xy) * 0.5);
+                R"SkSL(float2 translatedFragPosFloat = sk_FragCoord.xy - %s.xy;
+float2 proxyCenter = (%s.zw - %s.xy) * 0.5;
 half edgeSize = (2.0 * %s + %s) + 0.5;
-translatedFragPos -= proxyCenter;
-half2 fragDirection = sign(translatedFragPos);
-translatedFragPos = abs(translatedFragPos);
-translatedFragPos -= proxyCenter - edgeSize;
-translatedFragPos = max(translatedFragPos, 0.0);
-translatedFragPos *= fragDirection;
-translatedFragPos += half2(edgeSize);
+translatedFragPosFloat -= proxyCenter;
+half2 fragDirection = half2(sign(translatedFragPosFloat));
+translatedFragPosFloat = abs(translatedFragPosFloat);
+half2 translatedFragPosHalf = half2(translatedFragPosFloat - (proxyCenter - float(edgeSize)));
+translatedFragPosHalf = max(translatedFragPosHalf, 0.0);
+translatedFragPosHalf *= fragDirection;
+translatedFragPosHalf += half2(edgeSize);
 half2 proxyDims = half2(2.0 * edgeSize);
-half2 texCoord = translatedFragPos / proxyDims;)SkSL",
+half2 texCoord = translatedFragPosHalf / proxyDims;)SkSL",
                 args.fUniformHandler->getUniformCStr(proxyRectVar),
                 args.fUniformHandler->getUniformCStr(proxyRectVar),
                 args.fUniformHandler->getUniformCStr(proxyRectVar),
                 args.fUniformHandler->getUniformCStr(blurRadiusVar),
                 args.fUniformHandler->getUniformCStr(cornerRadiusVar));
-        SkString _sample15531 = this->invokeChild(0, args);
+        SkString _sample0 = this->invokeChild(0, args);
+        SkString _coords1("float2(texCoord)");
+        SkString _sample1 = this->invokeChild(1, args, _coords1.c_str());
         fragBuilder->codeAppendf(
                 R"SkSL(
-half4 inputColor = %s;)SkSL",
-                _sample15531.c_str());
-        SkString _coords15579("float2(texCoord)");
-        SkString _sample15579 = this->invokeChild(1, args, _coords15579.c_str());
-        fragBuilder->codeAppendf(
-                R"SkSL(
-%s = inputColor * %s;
+return %s * %s.w;
 )SkSL",
-                args.fOutputColor, _sample15579.c_str());
+                _sample0.c_str(),
+                _sample1.c_str());
     }
 
 private:
@@ -378,8 +452,8 @@ private:
     UniformHandle blurRadiusVar;
     UniformHandle cornerRadiusVar;
 };
-GrGLSLFragmentProcessor* GrRRectBlurEffect::onCreateGLSLInstance() const {
-    return new GrGLSLRRectBlurEffect();
+std::unique_ptr<GrGLSLFragmentProcessor> GrRRectBlurEffect::onMakeProgramImpl() const {
+    return std::make_unique<GrGLSLRRectBlurEffect>();
 }
 void GrRRectBlurEffect::onGetGLSLProcessorKey(const GrShaderCaps& caps,
                                               GrProcessorKeyBuilder* b) const {}
@@ -391,7 +465,6 @@ bool GrRRectBlurEffect::onIsEqual(const GrFragmentProcessor& other) const {
     if (cornerRadius != that.cornerRadius) return false;
     return true;
 }
-bool GrRRectBlurEffect::usesExplicitReturn() const { return false; }
 GrRRectBlurEffect::GrRRectBlurEffect(const GrRRectBlurEffect& src)
         : INHERITED(kGrRRectBlurEffect_ClassID, src.optimizationFlags())
         , sigma(src.sigma)
@@ -404,8 +477,13 @@ std::unique_ptr<GrFragmentProcessor> GrRRectBlurEffect::clone() const {
 }
 #if GR_TEST_UTILS
 SkString GrRRectBlurEffect::onDumpInfo() const {
-    return SkStringPrintf("(sigma=%f, rect=float4(%f, %f, %f, %f), cornerRadius=%f)", sigma,
-                          rect.left(), rect.top(), rect.right(), rect.bottom(), cornerRadius);
+    return SkStringPrintf("(sigma=%f, rect=float4(%f, %f, %f, %f), cornerRadius=%f)",
+                          sigma,
+                          rect.left(),
+                          rect.top(),
+                          rect.right(),
+                          rect.bottom(),
+                          cornerRadius);
 }
 #endif
 GR_DEFINE_FRAGMENT_PROCESSOR_TEST(GrRRectBlurEffect);

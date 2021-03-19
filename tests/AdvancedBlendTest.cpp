@@ -11,7 +11,7 @@
 #include "include/private/SkColorData.h"
 #include "src/gpu/GrBlend.h"
 #include "src/gpu/GrCaps.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrPaint.h"
 #include "src/gpu/GrProcessorAnalysis.h"
 #include "src/gpu/GrProcessorSet.h"
@@ -35,7 +35,8 @@ DEF_GPUTEST_FOR_RENDERING_CONTEXTS(AdvancedBlendTest, reporter, ctxInfo) {
         const GrXPFactory* xpf = GrCustomXfermode::Get(blendMode);
 
         GrXPFactory::AnalysisProperties xpfAnalysis =
-                GrXPFactory::GetAnalysisProperties(xpf, opaque, coverage, caps, GrClampType::kAuto);
+                GrXPFactory::GetAnalysisProperties(xpf, opaque, coverage, false, caps,
+                                                   GrClampType::kAuto);
 
         GrPaint paint;
         paint.setXPFactory(xpf);

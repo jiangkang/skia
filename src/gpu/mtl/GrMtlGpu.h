@@ -8,7 +8,9 @@
 #ifndef GrMtlGpu_DEFINED
 #define GrMtlGpu_DEFINED
 
+#include "include/gpu/mtl/GrMtlBackendContext.h"
 #include "include/private/SkDeque.h"
+
 #include "src/gpu/GrFinishCallbacks.h"
 #include "src/gpu/GrGpu.h"
 #include "src/gpu/GrRenderTarget.h"
@@ -16,10 +18,10 @@
 #include "src/gpu/GrStagingBufferManager.h"
 #include "src/gpu/GrTexture.h"
 
+#include "src/gpu/mtl/GrMtlAttachment.h"
 #include "src/gpu/mtl/GrMtlCaps.h"
 #include "src/gpu/mtl/GrMtlCommandBuffer.h"
 #include "src/gpu/mtl/GrMtlResourceProvider.h"
-#include "src/gpu/mtl/GrMtlStencilAttachment.h"
 #include "src/gpu/mtl/GrMtlUtil.h"
 
 #import <Metal/Metal.h>
@@ -27,20 +29,17 @@
 class GrMtlOpsRenderPass;
 class GrMtlTexture;
 class GrSemaphore;
-struct GrMtlBackendContext;
 class GrMtlCommandBuffer;
-
-namespace SkSL {
-    class Compiler;
-}
 
 class GrMtlGpu : public GrGpu {
 public:
-    static sk_sp<GrGpu> Make(GrDirectContext*, const GrContextOptions&,
-                             id<MTLDevice>, id<MTLCommandQueue>);
+    static sk_sp<GrGpu> Make(const GrMtlBackendContext&, const GrContextOptions&, GrDirectContext*);
     ~GrMtlGpu() override;
 
     void disconnect(DisconnectType) override;
+
+    GrThreadSafePipelineBuilder* pipelineBuilder() override;
+    sk_sp<GrThreadSafePipelineBuilder> refPipelineBuilder() override;
 
     const GrMtlCaps& mtlCaps() const { return *fMtlCaps.get(); }
 
@@ -48,10 +47,7 @@ public:
 
     GrMtlResourceProvider& resourceProvider() { return fResourceProvider; }
 
-    GrMtlCommandBuffer* commandBuffer() {
-        SkASSERT(fCurrentCmdBuffer);
-        return fCurrentCmdBuffer.get();
-     }
+    GrMtlCommandBuffer* commandBuffer();
 
     enum SyncQueue {
         kForce_SyncQueue,
@@ -62,13 +58,16 @@ public:
 
     bool compile(const GrProgramDesc&, const GrProgramInfo&) override;
 
+    bool precompileShader(const SkData& key, const SkData& data) override;
+
 #if GR_TEST_UTILS
     bool isTestingOnlyBackendTexture(const GrBackendTexture&) const override;
 
-    GrBackendRenderTarget createTestingOnlyBackendRenderTarget(int w, int h, GrColorType) override;
+    GrBackendRenderTarget createTestingOnlyBackendRenderTarget(SkISize dimensions,
+                                                               GrColorType,
+                                                               int sampleCnt,
+                                                               GrProtected) override;
     void deleteTestingOnlyBackendRenderTarget(const GrBackendRenderTarget&) override;
-
-    void testingOnly_flushGpuAndSync() override;
 
     void resetShaderCacheForTesting() const override {
         fResourceProvider.resetShaderCacheForTesting();
@@ -83,15 +82,11 @@ public:
     bool onCopySurface(GrSurface* dst, GrSurface* src, const SkIRect& srcRect,
                        const SkIPoint& dstPoint) override;
 
-    GrOpsRenderPass* getOpsRenderPass(
-            GrRenderTarget*, GrStencilAttachment*,
-            GrSurfaceOrigin, const SkIRect& bounds,
-            const GrOpsRenderPass::LoadAndStoreInfo&,
-            const GrOpsRenderPass::StencilLoadAndStoreInfo&,
-            const SkTArray<GrSurfaceProxy*, true>& sampledProxies,
-            GrXferBarrierFlags renderPassXferBarriers) override;
-
-    SkSL::Compiler* shaderCompiler() const { return fCompiler.get(); }
+#if GR_METAL_SDK_VERSION >= 230
+    id<MTLBinaryArchive> binaryArchive() const SK_API_AVAILABLE(macos(11.0), ios(14.0)) {
+        return fBinaryArchive;
+    }
+#endif
 
     void submit(GrOpsRenderPass* renderPass) override;
 
@@ -107,6 +102,7 @@ public:
     void insertSemaphore(GrSemaphore* semaphore) override;
     void waitSemaphore(GrSemaphore* semaphore) override;
     void checkFinishProcs() override { this->checkForFinishedCommandBuffers(); }
+    void finishOutstandingGpuWork() override;
     std::unique_ptr<GrSemaphore> prepareTextureForCrossContextUsage(GrTexture*) override;
 
     // When the Metal backend actually uses indirect command buffers, this function will actually do
@@ -120,11 +116,9 @@ public:
 
 private:
     GrMtlGpu(GrDirectContext*, const GrContextOptions&, id<MTLDevice>,
-             id<MTLCommandQueue>, MTLFeatureSet);
+             id<MTLCommandQueue>, GrMTLHandle binaryArchive, MTLFeatureSet);
 
     void destroyResources();
-
-    void onResetContext(uint32_t resetBits) override {}
 
     void querySampleLocations(GrRenderTarget*, SkTArray<SkPoint>*) override {
         SkASSERT(!this->caps()->sampleLocationsSupport());
@@ -186,9 +180,6 @@ private:
 
     sk_sp<GrRenderTarget> onWrapBackendRenderTarget(const GrBackendRenderTarget&) override;
 
-    sk_sp<GrRenderTarget> onWrapBackendTextureAsRenderTarget(const GrBackendTexture&,
-                                                             int sampleCnt) override;
-
     sk_sp<GrGpuBuffer> onCreateBuffer(size_t, GrGpuBufferType, GrAccessPattern,
                                       const void*) override;
 
@@ -202,11 +193,11 @@ private:
                        bool prepForTexSampling) override;
 
     bool onTransferPixelsTo(GrTexture*, int left, int top, int width, int height,
-                            GrColorType textureColorType, GrColorType bufferColorType, GrGpuBuffer*,
-                            size_t offset, size_t rowBytes) override;
+                            GrColorType textureColorType, GrColorType bufferColorType,
+                            sk_sp<GrGpuBuffer>, size_t offset, size_t rowBytes) override;
     bool onTransferPixelsFrom(GrSurface*, int left, int top, int width, int height,
                               GrColorType surfaceColorType, GrColorType bufferColorType,
-                              GrGpuBuffer*, size_t offset) override;
+                              sk_sp<GrGpuBuffer>, size_t offset) override;
 
     bool onRegenerateMipMapLevels(GrTexture*) override;
 
@@ -217,6 +208,15 @@ private:
     void addFinishedProc(GrGpuFinishedProc finishedProc,
                          GrGpuFinishedContext finishedContext) override;
     void addFinishedCallback(sk_sp<GrRefCntedCallback> finishedCallback);
+
+    GrOpsRenderPass* onGetOpsRenderPass(GrRenderTarget*,
+                                        GrAttachment*,
+                                        GrSurfaceOrigin,
+                                        const SkIRect&,
+                                        const GrOpsRenderPass::LoadAndStoreInfo&,
+                                        const GrOpsRenderPass::StencilLoadAndStoreInfo&,
+                                        const SkTArray<GrSurfaceProxy*, true>& sampledProxies,
+                                        GrXferBarrierFlags renderPassXferBarriers) override;
 
     bool onSubmitToGpu(bool syncCpu) override;
 
@@ -236,11 +236,23 @@ private:
                               GrColorType dstColorType, id<MTLBuffer> transferBuffer, size_t offset,
                               size_t imageBytes, size_t rowBytes);
 
-    GrStencilAttachment* createStencilAttachmentForRenderTarget(
+    sk_sp<GrAttachment> makeStencilAttachmentForRenderTarget(
             const GrRenderTarget*, SkISize dimensions, int numStencilSamples) override;
+
+    GrBackendFormat getPreferredStencilFormat(const GrBackendFormat&) override {
+        return GrBackendFormat::MakeMtl(this->mtlCaps().preferredStencilFormat());
+    }
+
+    sk_sp<GrAttachment> makeMSAAAttachment(SkISize dimensions,
+                                           const GrBackendFormat& format,
+                                           int numSamples,
+                                           GrProtected isProtected) override {
+        return nullptr;
+    }
 
     bool createMtlTextureForBackendSurface(MTLPixelFormat,
                                            SkISize dimensions,
+                                           int sampleCnt,
                                            GrTexturable,
                                            GrRenderable,
                                            GrMipmapped,
@@ -262,16 +274,12 @@ private:
 
     sk_sp<GrMtlCommandBuffer> fCurrentCmdBuffer;
 
-    struct OutstandingCommandBuffer {
-        OutstandingCommandBuffer(sk_sp<GrMtlCommandBuffer> commandBuffer, GrFence fence)
-            : fCommandBuffer(std::move(commandBuffer))
-            , fFence(fence) {}
-        sk_sp<GrMtlCommandBuffer> fCommandBuffer;
-        GrFence fFence;
-    };
+    using OutstandingCommandBuffer = sk_sp<GrMtlCommandBuffer>;
     SkDeque fOutstandingCommandBuffers;
 
-    std::unique_ptr<SkSL::Compiler> fCompiler;
+#if GR_METAL_SDK_VERSION >= 230
+    id<MTLBinaryArchive> fBinaryArchive SK_API_AVAILABLE(macos(11.0), ios(14.0));
+#endif
 
     GrMtlResourceProvider fResourceProvider;
     GrStagingBufferManager fStagingBufferManager;

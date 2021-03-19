@@ -12,7 +12,7 @@
 #include "include/gpu/GrRecordingContext.h"
 #include "src/core/SkUtils.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/SkGr.h"
 #include "src/gpu/text/GrTextBlob.h"
 #include "src/utils/SkUTF.h"
@@ -42,33 +42,37 @@ class DirectMaskGlyphVertexFillBenchmark : public Benchmark {
         builder.drawTextUTF8(paint, font, gText, len, {100, 100});
         auto glyphRunList = builder.useGlyphRunList();
         SkASSERT(!glyphRunList.empty());
-        fBlob = GrTextBlob::Make(glyphRunList, view);
-        SkSurfaceProps props{SkSurfaceProps::kLegacyFontHost_InitType};
+        SkSurfaceProps props;
+        if (canvas) { canvas->getProps(&props); }
+
         auto colorSpace = SkColorSpace::MakeSRGB();
         SkGlyphRunListPainter painter{props, kUnknown_SkColorType,
                                       colorSpace.get(), SkStrikeCache::GlobalStrikeCache()};
+        SkMatrix drawMatrix = view;
+        const SkPoint drawOrigin = glyphRunList.origin();
+        drawMatrix.preTranslate(drawOrigin.x(), drawOrigin.y());
+        GrSDFTControl control{false, props.isUseDeviceIndependentFonts(), 256, 256};
+        fBlob = GrTextBlob::Make(glyphRunList, drawMatrix, control, &painter);
 
-        GrSDFTOptions options{256, 256};
-        painter.processGlyphRunList(
-                glyphRunList, view, props, false, options, fBlob.get());
-
-
-        SkASSERT(fBlob->subRunList().head() != nullptr);
-        GrAtlasSubRun* subRun = static_cast<GrAtlasSubRun*>(fBlob->subRunList().head());
+        SkASSERT(!fBlob->subRunList().isEmpty());
+        GrAtlasSubRun* subRun = fBlob->subRunList().front().testingOnly_atlasSubRun();
+        SkASSERT(subRun);
         subRun->testingOnly_packedGlyphIDToGrGlyph(&fCache);
-        fVertices.reset(new char[subRun->vertexStride() * subRun->glyphCount() * 4]);
+        fVertices.reset(new char[subRun->vertexStride(drawMatrix) * subRun->glyphCount() * 4]);
     }
 
     void onDraw(int loops, SkCanvas* canvas) override {
-        GrAtlasSubRun* subRun = static_cast<GrAtlasSubRun*>(fBlob->subRunList().head());
+        GrAtlasSubRun* subRun = fBlob->subRunList().front().testingOnly_atlasSubRun();
+        SkASSERT(subRun);
 
         SkIRect clip = SkIRect::MakeEmpty();
         SkPaint paint;
         GrColor grColor = SkColorToPremulGrColor(paint.getColor());
+        SkMatrix positionMatrix = SkMatrix::Translate(100, 100);
 
         for (int loop = 0; loop < loops; loop++) {
             subRun->fillVertexData(fVertices.get(), 0, subRun->glyphCount(),
-                                   grColor, SkMatrix::I(), {100, 100}, clip);
+                                   grColor, positionMatrix, clip);
         }
     }
 

@@ -10,7 +10,7 @@
 #ifdef SK_VULKAN
 
 #include "include/gpu/GrDirectContext.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/vk/GrVkGpu.h"
 #include "src/gpu/vk/GrVkUtil.h"
 
@@ -196,6 +196,7 @@ bool VkYcbcrSamplerHelper::createBackendTexture(uint32_t width, uint32_t height)
                                VK_IMAGE_LAYOUT_UNDEFINED,
                                vkImageInfo.format,
                                vkImageInfo.usage,
+                               1 /* sample count */,
                                1 /* levelCount */,
                                VK_QUEUE_FAMILY_IGNORED,
                                GrProtected::kNo,

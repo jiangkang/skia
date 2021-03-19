@@ -11,7 +11,7 @@
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/GrRecordingContext.h"
 #include "src/gpu/GrCaps.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrGpu.h"
 #include "src/gpu/GrRecordingContextPriv.h"
 #include "src/gpu/GrShaderCaps.h"
@@ -32,24 +32,18 @@ GrPathRendererChain::GrPathRendererChain(GrRecordingContext* context, const Opti
     if (options.fGpuPathRenderers & GpuPathRenderers::kDashLine) {
         fChain.push_back(sk_make_sp<GrDashLinePathRenderer>());
     }
-    if (options.fGpuPathRenderers & GpuPathRenderers::kTessellation) {
-        if (GrTessellationPathRenderer::IsSupported(caps)) {
-            auto tess = sk_make_sp<GrTessellationPathRenderer>(context);
-            context->priv().addOnFlushCallbackObject(tess.get());
-            fChain.push_back(std::move(tess));
-        }
-    }
     if (options.fGpuPathRenderers & GpuPathRenderers::kAAConvex) {
         fChain.push_back(sk_make_sp<GrAAConvexPathRenderer>());
     }
     if (options.fGpuPathRenderers & GpuPathRenderers::kCoverageCounting) {
-        using AllowCaching = GrCoverageCountingPathRenderer::AllowCaching;
-        if (auto ccpr = GrCoverageCountingPathRenderer::CreateIfSupported(
-                                caps, AllowCaching(options.fAllowPathMaskCaching),
-                                context->priv().contextID())) {
-            fCoverageCountingPathRenderer = ccpr.get();
-            context->priv().addOnFlushCallbackObject(fCoverageCountingPathRenderer);
-            fChain.push_back(std::move(ccpr));
+        // opsTask IDs for the atlas have an issue with --reduceOpsTaskSplitting: skbug.com/11731
+        if (context->priv().options().fReduceOpsTaskSplitting != GrContextOptions::Enable::kYes) {
+            fCoverageCountingPathRenderer = GrCoverageCountingPathRenderer::CreateIfSupported(caps);
+            if (fCoverageCountingPathRenderer) {
+                // Don't add to the chain. This is only for clips.
+                // TODO: Remove from here.
+                context->priv().addOnFlushCallbackObject(fCoverageCountingPathRenderer.get());
+            }
         }
     }
     if (options.fGpuPathRenderers & GpuPathRenderers::kAAHairline) {
@@ -75,6 +69,14 @@ GrPathRendererChain::GrPathRendererChain(GrRecordingContext* context, const Opti
     }
     if (options.fGpuPathRenderers & GpuPathRenderers::kTriangulating) {
         fChain.push_back(sk_make_sp<GrTriangulatingPathRenderer>());
+    }
+    if (options.fGpuPathRenderers & GpuPathRenderers::kTessellation) {
+        if (GrTessellationPathRenderer::IsSupported(caps)) {
+            auto tess = sk_make_sp<GrTessellationPathRenderer>(context);
+            fTessellationPathRenderer = tess.get();
+            context->priv().addOnFlushCallbackObject(tess.get());
+            fChain.push_back(std::move(tess));
+        }
     }
 
     // We always include the default path renderer (as well as SW), so we can draw any path

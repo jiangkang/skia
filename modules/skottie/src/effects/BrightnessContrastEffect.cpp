@@ -9,6 +9,7 @@
 
 #include "include/core/SkColorFilter.h"
 #include "include/effects/SkRuntimeEffect.h"
+#include "include/private/SkTPin.h"
 #include "modules/skottie/src/Adapter.h"
 #include "modules/skottie/src/SkottieJson.h"
 #include "modules/skottie/src/SkottieValue.h"
@@ -72,7 +73,7 @@ static constexpr char CONTRAST_EFFECT[] = R"(
     uniform half a;
     uniform half b;
     uniform half c;
-    in shader input;
+    uniform shader input;
 
     half4 main() {
         // C' = a*C^3 + b*C^2 + c*C
@@ -96,7 +97,7 @@ static sk_sp<SkData> make_contrast_coeffs(float contrast) {
 
 static constexpr char CONTRAST_EFFECT[] = R"(
     uniform half a;
-    in shader input;
+    uniform shader input;
 
     half4 main() {
         half4 color = sample(input);
@@ -123,7 +124,7 @@ static sk_sp<SkData> make_brightness_coeffs(float brightness) {
 
 static constexpr char BRIGHTNESS_EFFECT[] = R"(
     uniform half a;
-    in shader input;
+    uniform shader input;
 
     half4 main() {
         half4 color = sample(input);
@@ -139,8 +140,8 @@ public:
                               const AnimationBuilder& abuilder,
                               sk_sp<sksg::RenderNode> layer)
         : INHERITED(sksg::ExternalColorFilter::Make(std::move(layer)))
-        , fBrightnessEffect(std::get<0>(SkRuntimeEffect::Make(SkString(BRIGHTNESS_EFFECT))))
-        , fContrastEffect(std::get<0>(SkRuntimeEffect::Make(SkString(CONTRAST_EFFECT)))) {
+        , fBrightnessEffect(SkRuntimeEffect::Make(SkString(BRIGHTNESS_EFFECT)).effect)
+        , fContrastEffect(SkRuntimeEffect::Make(SkString(CONTRAST_EFFECT)).effect) {
         SkASSERT(fBrightnessEffect);
         SkASSERT(fContrastEffect);
 

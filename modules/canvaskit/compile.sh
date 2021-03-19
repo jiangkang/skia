@@ -25,9 +25,8 @@ EMCC=`which emcc`
 EMCXX=`which em++`
 EMAR=`which emar`
 
-RELEASE_CONF="-Oz --closure 1 -DSK_RELEASE --pre-js $BASE_DIR/release.js \
-              -DGR_GL_CHECK_ALLOC_WITH_GET_ERROR=0"
-EXTRA_CFLAGS="\"-DSK_RELEASE\", \"-DGR_GL_CHECK_ALLOC_WITH_GET_ERROR=0\","
+RELEASE_CONF="-Oz --closure 1 -DSK_RELEASE --pre-js $BASE_DIR/release.js"
+EXTRA_CFLAGS="\"-DSK_RELEASE\","
 IS_OFFICIAL_BUILD="true"
 
 # Tracing will be disabled in release/profiling unless this flag is seen. Tracing will
@@ -40,7 +39,7 @@ fi
 if [[ $@ == *debug* ]]; then
   echo "Building a Debug build"
   EXTRA_CFLAGS="\"-DSK_DEBUG\","
-  RELEASE_CONF="-O0 --js-opts 0 -s DEMANGLE_SUPPORT=1 -s ASSERTIONS=1 -s GL_ASSERTIONS=1 -g4 \
+  RELEASE_CONF="-O0 --js-opts 0 -s DEMANGLE_SUPPORT=1 -s ASSERTIONS=1 -s GL_ASSERTIONS=1 -g3 \
                 --source-map-base /node_modules/canvaskit/bin/ -DSK_DEBUG --pre-js $BASE_DIR/debug.js"
   BUILD_DIR=${BUILD_DIR:="out/canvaskit_wasm_debug"}
 elif [[ $@ == *profiling* ]]; then
@@ -124,14 +123,12 @@ if [[ $@ == *no_managed_skottie* || $@ == *no_skottie* ]]; then
   MANAGED_SKOTTIE_BINDINGS="-DSK_INCLUDE_MANAGED_SKOTTIE=0"
 fi
 
-GN_PARTICLES="skia_enable_sksl_interpreter=true"
 PARTICLES_JS="--pre-js $BASE_DIR/particles.js"
 PARTICLES_BINDINGS="$BASE_DIR/particles_bindings.cpp"
 PARTICLES_LIB="$BUILD_DIR/libparticles.a"
 
 if [[ $@ == *no_particles* ]]; then
   echo "Omitting Particles"
-  GN_PARTICLES="skia_enable_sksl_interpreter=false"
   PARTICLES_JS=""
   PARTICLES_BINDINGS=""
   PARTICLES_LIB=""
@@ -156,6 +153,12 @@ if [[ $@ == *no_rt_shader* ]] ; then
   RT_SHADER_JS=""
 fi
 
+MATRIX_HELPER_JS="--pre-js $BASE_DIR/matrix.js"
+if [[ $@ == *no_matrix* ]]; then
+  echo "Omitting matrix helper code"
+  MATRIX_HELPER_JS=""
+fi
+
 HTML_CANVAS_API="--pre-js $BASE_DIR/htmlcanvas/preamble.js \
 --pre-js $BASE_DIR/htmlcanvas/util.js \
 --pre-js $BASE_DIR/htmlcanvas/color.js \
@@ -168,18 +171,21 @@ HTML_CANVAS_API="--pre-js $BASE_DIR/htmlcanvas/preamble.js \
 --pre-js $BASE_DIR/htmlcanvas/pattern.js \
 --pre-js $BASE_DIR/htmlcanvas/radialgradient.js \
 --pre-js $BASE_DIR/htmlcanvas/postamble.js "
-if [[ $@ == *no_canvas* ]]; then
+if [[ $@ == *no_canvas* || $@ == *no_matrix* ]]; then
+  # Note: HTML Canvas bindings depend on the matrix helpers.
   echo "Omitting bindings for HTML Canvas API"
   HTML_CANVAS_API=""
 fi
 
 GN_FONT="skia_enable_fontmgr_custom_directory=false "
+WOFF2_FONT="skia_use_freetype_woff2=true"
 FONT_CFLAGS=""
 BUILTIN_FONT=""
 FONT_JS="--pre-js $BASE_DIR/font.js"
 if [[ $@ == *no_font* ]]; then
   echo "Omitting the built-in font(s), font manager and all code dealing with fonts"
   FONT_CFLAGS="-DSK_NO_FONTS"
+  WOFF2_FONT=""
   FONT_JS=""
   GN_FONT+="skia_enable_fontmgr_custom_embedded=false skia_enable_fontmgr_custom_empty=false"
 elif [[ $@ == *no_embedded_font* ]]; then
@@ -194,6 +200,10 @@ else
       --align 4
   BUILTIN_FONT="$BASE_DIR/fonts/NotoMono-Regular.ttf.cpp"
   GN_FONT+="skia_enable_fontmgr_custom_embedded=true skia_enable_fontmgr_custom_empty=false"
+fi
+
+if [[ $@ == *no_woff2* ]]; then
+  WOFF2_FONT="skia_use_freetype_woff2=false"
 fi
 
 if [[ $@ == *no_alias_font* ]]; then
@@ -262,16 +272,11 @@ set -e
 
 echo "Compiling bitcode"
 
-# With emsdk 2.0.0 we get a false positive on tautological-value-range-compare. This appears to be
-# fixed in the emsdk 2.0.4 toolchain. Disable the warning while we maintain support for 2.0.0.
-EXTRA_CFLAGS+="\"-Wno-tautological-value-range-compare\","
-
 # Inspired by https://github.com/Zubnix/skia-wasm-port/blob/master/build_bindings.sh
 ./bin/gn gen ${BUILD_DIR} \
   --args="cc=\"${EMCC}\" \
   cxx=\"${EMCXX}\" \
   ar=\"${EMAR}\" \
-  extra_cflags_cc=[\"-frtti\"] \
   extra_cflags=[\"-s\", \"WARN_UNALIGNED=1\", \"-s\", \"MAIN_MODULE=1\",
     \"-DSKNX_NO_SIMD\", \"-DSK_DISABLE_AAA\",
     \"-DSK_FORCE_8_BYTE_ALIGNMENT\",
@@ -311,7 +316,7 @@ EXTRA_CFLAGS+="\"-Wno-tautological-value-range-compare\","
   ${GN_SHAPER} \
   ${GN_GPU} \
   ${GN_FONT} \
-  ${GN_PARTICLES} \
+  ${WOFF2_FONT} \
   ${GN_VIEWER} \
   \
   skia_enable_skshaper=true \
@@ -351,6 +356,8 @@ EMCC_DEBUG=1 ${EMCXX} \
     -Ithird_party/externals/icu/source/common/ \
     -DSK_DISABLE_AAA \
     -DSK_FORCE_8_BYTE_ALIGNMENT \
+    -DEMSCRIPTEN_HAS_UNBOUND_TYPE_NAMES=0 \
+    -fno-rtti \
     $WASM_GPU \
     $WASM_PATHOPS \
     $WASM_RT_SHADER \
@@ -360,8 +367,12 @@ EMCC_DEBUG=1 ${EMCXX} \
     --bind \
     --no-entry \
     --pre-js $BASE_DIR/preamble.js \
+    --pre-js $BASE_DIR/color.js \
+    --pre-js $BASE_DIR/memory.js \
     --pre-js $BASE_DIR/helper.js \
+    --pre-js $BASE_DIR/util.js \
     --pre-js $BASE_DIR/interface.js \
+    $MATRIX_HELPER_JS \
     $PARAGRAPH_JS \
     $SKOTTIE_JS \
     $PARTICLES_JS \
@@ -388,12 +399,12 @@ EMCC_DEBUG=1 ${EMCXX} \
     -s LLD_REPORT_UNDEFINED \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s EXPORT_NAME="CanvasKitInit" \
+    -s EXPORTED_FUNCTIONS=['_malloc','_free'] \
     -s FORCE_FILESYSTEM=0 \
     -s FILESYSTEM=0 \
     -s MODULARIZE=1 \
     -s NO_EXIT_RUNTIME=1 \
     -s INITIAL_MEMORY=128MB \
-    -s WARN_UNALIGNED=1 \
     -s WASM=1 \
     $STRICTNESS \
     -o $BUILD_DIR/canvaskit.js

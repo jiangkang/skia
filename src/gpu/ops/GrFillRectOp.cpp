@@ -62,12 +62,12 @@ private:
     using Helper = GrSimpleMeshDrawOpHelperWithStencil;
 
 public:
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          GrPaint&& paint,
-                                          GrAAType aaType,
-                                          DrawQuad* quad,
-                                          const GrUserStencilSettings* stencilSettings,
-                                          Helper::InputFlags inputFlags) {
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            GrPaint&& paint,
+                            GrAAType aaType,
+                            DrawQuad* quad,
+                            const GrUserStencilSettings* stencilSettings,
+                            Helper::InputFlags inputFlags) {
         // Clean up deviations between aaType and edgeAA
         GrQuadUtils::ResolveAAType(aaType, quad->fEdgeFlags, quad->fDevice,
                                    &aaType, &quad->fEdgeFlags);
@@ -77,10 +77,10 @@ public:
 
     // aaType is passed to Helper in the initializer list, so incongruities between aaType and
     // edgeFlags must be resolved prior to calling this constructor.
-    FillRectOp(Helper::MakeArgs args, SkPMColor4f paintColor, GrAAType aaType,
+    FillRectOp(GrProcessorSet* processorSet, SkPMColor4f paintColor, GrAAType aaType,
                DrawQuad* quad, const GrUserStencilSettings* stencil, Helper::InputFlags inputFlags)
             : INHERITED(ClassID())
-            , fHelper(args, aaType, stencil, inputFlags)
+            , fHelper(processorSet, aaType, stencil, inputFlags)
             , fQuads(1, !fHelper.isTrivial()) {
         // Set bounds before clipping so we don't have to worry about unioning the bounds of
         // the two potential quads (GrQuad::bounds() is perspective-safe).
@@ -198,17 +198,16 @@ private:
     }
 
     GrProgramInfo* programInfo() override {
-        // This Op implements its own onPrePrepareDraws so this entry point should never be called.
-        SkASSERT(0);
         return fProgramInfo;
     }
 
     void onCreateProgramInfo(const GrCaps* caps,
                              SkArenaAlloc* arena,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              GrAppliedClip&& appliedClip,
                              const GrXferProcessor::DstProxyView& dstProxyView,
-                             GrXferBarrierFlags renderPassXferBarriers) override {
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp) override {
         const VertexSpec vertexSpec = this->vertexSpec();
 
         GrGeometryProcessor* gp = GrQuadPerEdgeAA::MakeProcessor(arena, vertexSpec);
@@ -218,27 +217,23 @@ private:
                                                             std::move(appliedClip),
                                                             dstProxyView, gp,
                                                             vertexSpec.primitiveType(),
-                                                            renderPassXferBarriers);
+                                                            renderPassXferBarriers, colorLoadOp);
     }
 
-    void onPrePrepareDraws(GrRecordingContext* context,
-                           const GrSurfaceProxyView* writeView,
+    void onPrePrepareDraws(GrRecordingContext* rContext,
+                           const GrSurfaceProxyView& writeView,
                            GrAppliedClip* clip,
                            const GrXferProcessor::DstProxyView& dstProxyView,
-                           GrXferBarrierFlags renderPassXferBarriers) override {
+                           GrXferBarrierFlags renderPassXferBarriers,
+                           GrLoadOp colorLoadOp) override {
         TRACE_EVENT0("skia.gpu", TRACE_FUNC);
 
         SkASSERT(!fPrePreparedVertices);
 
-        SkArenaAlloc* arena = context->priv().recordTimeAllocator();
+        INHERITED::onPrePrepareDraws(rContext, writeView, clip, dstProxyView,
+                                     renderPassXferBarriers, colorLoadOp);
 
-        // This is equivalent to a GrOpFlushState::detachAppliedClip
-        GrAppliedClip appliedClip = clip ? std::move(*clip) : GrAppliedClip::Disabled();
-
-        this->createProgramInfo(context->priv().caps(), arena, writeView,
-                                std::move(appliedClip), dstProxyView, renderPassXferBarriers);
-
-        context->priv().recordProgramInfo(fProgramInfo);
+        SkArenaAlloc* arena = rContext->priv().recordTimeAllocator();
 
         const VertexSpec vertexSpec = this->vertexSpec();
 
@@ -325,8 +320,7 @@ private:
                                    fQuads.count(), totalNumVertices, fBaseVertex);
     }
 
-    CombineResult onCombineIfPossible(GrOp* t, GrRecordingContext::Arenas*,
-                                      const GrCaps& caps) override {
+    CombineResult onCombineIfPossible(GrOp* t, SkArenaAlloc*, const GrCaps& caps) override {
         TRACE_EVENT0("skia.gpu", TRACE_FUNC);
         const auto* that = t->cast<FillRectOp>();
 
@@ -464,34 +458,34 @@ private:
 
 } // anonymous namespace
 
-std::unique_ptr<GrDrawOp> GrFillRectOp::Make(GrRecordingContext* context,
-                                             GrPaint&& paint,
-                                             GrAAType aaType,
-                                             DrawQuad* quad,
-                                             const GrUserStencilSettings* stencil,
-                                             InputFlags inputFlags) {
+GrOp::Owner GrFillRectOp::Make(GrRecordingContext* context,
+                               GrPaint&& paint,
+                               GrAAType aaType,
+                               DrawQuad* quad,
+                               const GrUserStencilSettings* stencil,
+                               InputFlags inputFlags) {
     return FillRectOp::Make(context, std::move(paint), aaType, std::move(quad), stencil,
                             inputFlags);
 }
 
-std::unique_ptr<GrDrawOp> GrFillRectOp::MakeNonAARect(GrRecordingContext* context,
-                                                      GrPaint&& paint,
-                                                      const SkMatrix& view,
-                                                      const SkRect& rect,
-                                                      const GrUserStencilSettings* stencil) {
+GrOp::Owner GrFillRectOp::MakeNonAARect(GrRecordingContext* context,
+                                        GrPaint&& paint,
+                                        const SkMatrix& view,
+                                        const SkRect& rect,
+                                        const GrUserStencilSettings* stencil) {
     DrawQuad quad{GrQuad::MakeFromRect(rect, view), GrQuad(rect), GrQuadAAFlags::kNone};
     return FillRectOp::Make(context, std::move(paint), GrAAType::kNone, &quad, stencil,
                             InputFlags::kNone);
 }
 
-std::unique_ptr<GrDrawOp> GrFillRectOp::MakeOp(GrRecordingContext* context,
-                                               GrPaint&& paint,
-                                               GrAAType aaType,
-                                               const SkMatrix& viewMatrix,
-                                               const GrRenderTargetContext::QuadSetEntry quads[],
-                                               int cnt,
-                                               const GrUserStencilSettings* stencilSettings,
-                                               int* numConsumed) {
+GrOp::Owner GrFillRectOp::MakeOp(GrRecordingContext* context,
+                                 GrPaint&& paint,
+                                 GrAAType aaType,
+                                 const SkMatrix& viewMatrix,
+                                 const GrSurfaceDrawContext::QuadSetEntry quads[],
+                                 int cnt,
+                                 const GrUserStencilSettings* stencilSettings,
+                                 int* numConsumed) {
     // First make a draw op for the first quad in the set
     SkASSERT(cnt > 0);
 
@@ -499,8 +493,8 @@ std::unique_ptr<GrDrawOp> GrFillRectOp::MakeOp(GrRecordingContext* context,
                   GrQuad::MakeFromRect(quads[0].fRect, quads[0].fLocalMatrix),
                   quads[0].fAAFlags};
     paint.setColor4f(quads[0].fColor);
-    std::unique_ptr<GrDrawOp> op = FillRectOp::Make(context, std::move(paint), aaType,
-                                                    &quad, stencilSettings, InputFlags::kNone);
+    GrOp::Owner op = FillRectOp::Make(context, std::move(paint), aaType,
+                                      &quad, stencilSettings, InputFlags::kNone);
     FillRectOp* fillRects = op->cast<FillRectOp>();
 
     *numConsumed = 1;
@@ -524,13 +518,13 @@ std::unique_ptr<GrDrawOp> GrFillRectOp::MakeOp(GrRecordingContext* context,
     return op;
 }
 
-void GrFillRectOp::AddFillRectOps(GrRenderTargetContext* rtc,
+void GrFillRectOp::AddFillRectOps(GrSurfaceDrawContext* rtc,
                                   const GrClip* clip,
                                   GrRecordingContext* context,
                                   GrPaint&& paint,
                                   GrAAType aaType,
                                   const SkMatrix& viewMatrix,
-                                  const GrRenderTargetContext::QuadSetEntry quads[],
+                                  const GrSurfaceDrawContext::QuadSetEntry quads[],
                                   int cnt,
                                   const GrUserStencilSettings* stencilSettings) {
 
@@ -539,9 +533,9 @@ void GrFillRectOp::AddFillRectOps(GrRenderTargetContext* rtc,
     while (numLeft) {
         int numConsumed = 0;
 
-        std::unique_ptr<GrDrawOp> op = MakeOp(context, GrPaint::Clone(paint), aaType, viewMatrix,
-                                              &quads[offset], numLeft, stencilSettings,
-                                              &numConsumed);
+        GrOp::Owner op = MakeOp(context, GrPaint::Clone(paint), aaType, viewMatrix,
+                                &quads[offset], numLeft, stencilSettings,
+                                &numConsumed);
 
         offset += numConsumed;
         numLeft -= numConsumed;

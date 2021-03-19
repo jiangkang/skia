@@ -48,17 +48,21 @@
         }
         GL.makeContextCurrent(handle);
         return handle;
-      }
+      };
+
+      CanvasKit.deleteContext = function(handle) {
+        GL.deleteContext(handle);
+      };
 
       // idOrElement can be of types:
       //  - String - in which case it is interpreted as an id of a
       //          canvas element.
       //  - HTMLCanvasElement - in which the provided canvas element will
       //          be used directly.
-      // colorSpace - sk_sp<SkColorSpace> - one of the supported color spaces:
-      //          CanvasKit.SkColorSpace.SRGB
-      //          CanvasKit.SkColorSpace.DISPLAY_P3
-      //          CanvasKit.SkColorSpace.ADOBE_RGB
+      // colorSpace - sk_sp<ColorSpace> - one of the supported color spaces:
+      //          CanvasKit.ColorSpace.SRGB
+      //          CanvasKit.ColorSpace.DISPLAY_P3
+      //          CanvasKit.ColorSpace.ADOBE_RGB
       CanvasKit.MakeWebGLCanvasSurface = function(idOrElement, colorSpace, attrs) {
         colorSpace = colorSpace || null;
         var canvas = idOrElement;
@@ -72,8 +76,6 @@
         }
 
         var ctx = this.GetWebGLContext(canvas, attrs);
-        var openGLversion = canvas.GLctxObject.version;
-
         if (!ctx || ctx < 0) {
           throw 'failed to create webgl context: err ' + ctx;
         }
@@ -85,7 +87,7 @@
         // constrolled by css, and available in canvas.clientWidth/height.
         var surface = this.MakeOnScreenGLSurface(grcontext, canvas.width, canvas.height, colorSpace);
         if (!surface) {
-          SkDebug('falling back from GPU implementation to a SW based one');
+          Debug('falling back from GPU implementation to a SW based one');
           // we need to throw away the old canvas (which was locked to
           // a webGL context) and create a new one so we can
           var newCanvas = canvas.cloneNode(true);
@@ -98,7 +100,7 @@
         }
         surface._context = ctx;
         surface.grContext = grcontext;
-        surface.openGLversion = openGLversion;
+        surface.openGLversion = canvas.GLctxObject.version;
         return surface;
       };
       // Default to trying WebGL first.

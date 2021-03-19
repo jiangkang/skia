@@ -193,14 +193,14 @@ static void test_image_backed(skiatest::Reporter* reporter,
 DEF_TEST(ImageFilterCache_ImageBackedRaster, reporter) {
     SkBitmap srcBM = create_bm();
 
-    sk_sp<SkImage> srcImage(SkImage::MakeFromBitmap(srcBM));
+    sk_sp<SkImage> srcImage(srcBM.asImage());
 
     test_image_backed(reporter, nullptr, srcImage);
 }
 
 #include "include/gpu/GrDirectContext.h"
 #include "src/gpu/GrBitmapTextureMaker.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrResourceProvider.h"
 #include "src/gpu/GrSurfaceProxyPriv.h"

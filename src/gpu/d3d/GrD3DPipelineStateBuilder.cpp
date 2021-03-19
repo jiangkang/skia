@@ -13,7 +13,7 @@
 #include "include/gpu/d3d/GrD3DTypes.h"
 #include "src/core/SkTraceEvent.h"
 #include "src/gpu/GrAutoLocaleSetter.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrPersistentCacheUtils.h"
 #include "src/gpu/GrShaderCaps.h"
 #include "src/gpu/GrShaderUtils.h"
@@ -58,6 +58,10 @@ const GrCaps* GrD3DPipelineStateBuilder::caps() const {
     return fGpu->caps();
 }
 
+SkSL::Compiler* GrD3DPipelineStateBuilder::shaderCompiler() const {
+    return fGpu->shaderCompiler();
+}
+
 void GrD3DPipelineStateBuilder::finalizeFragmentOutputColor(GrShaderVar& outputColor) {
     outputColor.addLayoutQualifier("location = 0, index = 0");
 }
@@ -68,16 +72,17 @@ void GrD3DPipelineStateBuilder::finalizeFragmentSecondaryColor(GrShaderVar& outp
 
 static gr_cp<ID3DBlob> GrCompileHLSLShader(GrD3DGpu* gpu,
                                            const SkSL::String& hlsl,
-                                           SkSL::Program::Kind kind) {
+                                           SkSL::ProgramKind kind) {
+    TRACE_EVENT0("skia.shaders", "driver_compile_shader");
     const char* compileTarget = nullptr;
     switch (kind) {
-        case SkSL::Program::kVertex_Kind:
+        case SkSL::ProgramKind::kVertex:
             compileTarget = "vs_5_1";
             break;
-        case SkSL::Program::kGeometry_Kind:
+        case SkSL::ProgramKind::kGeometry:
             compileTarget = "gs_5_1";
             break;
-        case SkSL::Program::kFragment_Kind:
+        case SkSL::ProgramKind::kFragment:
             compileTarget = "ps_5_1";
             break;
         default:
@@ -112,7 +117,7 @@ bool GrD3DPipelineStateBuilder::loadHLSLFromCache(SkReadBuffer* reader, gr_cp<ID
         return false;
     }
 
-    auto compile = [&](SkSL::Program::Kind kind, GrShaderType shaderType) {
+    auto compile = [&](SkSL::ProgramKind kind, GrShaderType shaderType) {
         if (inputs[shaderType].fRTHeight) {
             this->addRTHeightUniform(SKSL_RTHEIGHT_NAME);
         }
@@ -120,14 +125,14 @@ bool GrD3DPipelineStateBuilder::loadHLSLFromCache(SkReadBuffer* reader, gr_cp<ID
         return shaders[shaderType].get();
     };
 
-    return compile(SkSL::Program::kVertex_Kind, kVertex_GrShaderType) &&
-           compile(SkSL::Program::kFragment_Kind, kFragment_GrShaderType) &&
+    return compile(SkSL::ProgramKind::kVertex, kVertex_GrShaderType) &&
+           compile(SkSL::ProgramKind::kFragment, kFragment_GrShaderType) &&
            (hlsl[kGeometry_GrShaderType].empty() ||
-            compile(SkSL::Program::kGeometry_Kind, kGeometry_GrShaderType));
+            compile(SkSL::ProgramKind::kGeometry, kGeometry_GrShaderType));
 }
 
 gr_cp<ID3DBlob> GrD3DPipelineStateBuilder::compileD3DProgram(
-        SkSL::Program::Kind kind,
+        SkSL::ProgramKind kind,
         const SkSL::String& sksl,
         const SkSL::Program::Settings& settings,
         SkSL::Program::Inputs* outInputs,
@@ -528,8 +533,11 @@ gr_cp<ID3D12PipelineState> create_pipeline_state(
     psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
     gr_cp<ID3D12PipelineState> pipelineState;
-    GR_D3D_CALL_ERRCHECK(gpu->device()->CreateGraphicsPipelineState(
-            &psoDesc, IID_PPV_ARGS(&pipelineState)));
+    {
+        TRACE_EVENT0("skia.shaders", "CreateGraphicsPipelineState");
+        GR_D3D_CALL_ERRCHECK(
+                gpu->device()->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState)));
+    }
 
     return pipelineState;
 }
@@ -538,7 +546,7 @@ static constexpr SkFourByteTag kHLSL_Tag = SkSetFourByteTag('H', 'L', 'S', 'L');
 static constexpr SkFourByteTag kSKSL_Tag = SkSetFourByteTag('S', 'K', 'S', 'L');
 
 sk_sp<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
-    TRACE_EVENT0("skia.gpu", TRACE_FUNC);
+    TRACE_EVENT0("skia.shaders", TRACE_FUNC);
 
     // We need to enable the following extensions so that the compiler can correctly make spir-v
     // from our glsl shaders.
@@ -550,7 +558,6 @@ sk_sp<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
     this->finalizeShaders();
 
     SkSL::Program::Settings settings;
-    settings.fCaps = this->caps()->shaderCaps();
     settings.fFlipY = this->origin() != kTopLeft_GrSurfaceOrigin;
     settings.fSharpenTextures =
         this->gpu()->getContext()->priv().options().fSharpenMipmappedTextures;
@@ -598,19 +605,19 @@ sk_sp<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
             }
         }
 
-        auto compile = [&](SkSL::Program::Kind kind, GrShaderType shaderType) {
+        auto compile = [&](SkSL::ProgramKind kind, GrShaderType shaderType) {
             shaders[shaderType] = this->compileD3DProgram(kind, *sksl[shaderType], settings,
                                                           &inputs[shaderType], &hlsl[shaderType]);
             return shaders[shaderType].get();
         };
 
-        if (!compile(SkSL::Program::kVertex_Kind, kVertex_GrShaderType) ||
-            !compile(SkSL::Program::kFragment_Kind, kFragment_GrShaderType)) {
+        if (!compile(SkSL::ProgramKind::kVertex, kVertex_GrShaderType) ||
+            !compile(SkSL::ProgramKind::kFragment, kFragment_GrShaderType)) {
             return nullptr;
         }
 
         if (primProc.willUseGeoShader()) {
-            if (!compile(SkSL::Program::kGeometry_Kind, kGeometry_GrShaderType)) {
+            if (!compile(SkSL::ProgramKind::kGeometry, kGeometry_GrShaderType)) {
                 return nullptr;
             }
         }
@@ -627,9 +634,11 @@ sk_sp<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
             }
             sk_sp<SkData> key =
                     SkData::MakeWithoutCopy(this->desc().asKey(), this->desc().initialKeyLength());
+            SkString description =
+                    GrProgramDesc::Describe(fRenderTarget, fProgramInfo, *this->caps());
             sk_sp<SkData> data = GrPersistentCacheUtils::PackCachedShaders(
                     cacheSkSL ? kSKSL_Tag : kHLSL_Tag, hlsl, inputs, kGrShaderTypeCount);
-            persistentCache->store(*key, *data);
+            persistentCache->store(*key, *data, description);
         }
     }
 
@@ -653,7 +662,7 @@ sk_sp<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
                                                             fUniformHandler.fSamplers.count(),
                                                             std::move(fGeometryProcessor),
                                                             std::move(fXferProcessor),
-                                                            std::move(fFragmentProcessors),
+                                                            std::move(fFPImpls),
                                                             primProc.vertexStride(),
                                                             primProc.instanceStride()));
 }

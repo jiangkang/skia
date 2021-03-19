@@ -30,7 +30,7 @@ public:
 
     bool canUseMixedSamples(const GrCaps& caps) const {
         return caps.mixedSamplesSupport() && !this->glRTFBOIDIs0() &&
-               caps.internalMultisampleCount(this->backendFormat()) > 0 &&
+               caps.internalMultisampleCount(this->backendFormat()) > 1 &&
                this->canChangeStencilAttachment();
     }
 
@@ -64,12 +64,10 @@ public:
         return fSurfaceFlags & GrInternalSurfaceFlags::kVkRTSupportsInputAttachment;
     }
 
-    void markMSAADirty(const SkIRect& dirtyRect, GrSurfaceOrigin origin) {
+    void markMSAADirty(SkIRect dirtyRect) {
         SkASSERT(SkIRect::MakeSize(this->backingStoreDimensions()).contains(dirtyRect));
         SkASSERT(this->requiresManualMSAAResolve());
-        auto nativeRect = GrNativeRect::MakeRelativeTo(
-                origin, this->backingStoreDimensions().height(), dirtyRect);
-        fMSAADirtyRect.join(nativeRect.asSkIRect());
+        fMSAADirtyRect.join(dirtyRect);
     }
     void markMSAAResolved() {
         SkASSERT(this->requiresManualMSAAResolve());
@@ -135,7 +133,7 @@ protected:
 private:
     bool canChangeStencilAttachment() const;
 
-    size_t onUninstantiatedGpuMemorySize(const GrCaps&) const override;
+    size_t onUninstantiatedGpuMemorySize() const override;
     SkDEBUGCODE(void onValidateSurface(const GrSurface*) override;)
 
             LazySurfaceDesc callbackDesc() const override;

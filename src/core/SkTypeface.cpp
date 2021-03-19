@@ -39,9 +39,10 @@ protected:
     sk_sp<SkTypeface> onMakeClone(const SkFontArguments& args) const override {
         return sk_ref_sp(this);
     }
-    SkScalerContext* onCreateScalerContext(const SkScalerContextEffects& effects,
-                                           const SkDescriptor* desc) const override {
-        return SkScalerContext::MakeEmptyContext(
+    std::unique_ptr<SkScalerContext> onCreateScalerContext(
+        const SkScalerContextEffects& effects, const SkDescriptor* desc) const override
+    {
+        return SkScalerContext::MakeEmpty(
                 sk_ref_sp(const_cast<SkEmptyTypeface*>(this)), effects, desc);
     }
     void onFilterRec(SkScalerContextRec*) const override { }
@@ -62,6 +63,9 @@ protected:
     };
     void onGetFamilyName(SkString* familyName) const override {
         familyName->reset();
+    }
+    bool onGetPostScriptName(SkString*) const override {
+        return false;
     }
     SkTypeface::LocalizedStrings* onCreateFamilyNameIterator() const override {
         return new EmptyLocalizedStrings;
@@ -288,6 +292,13 @@ std::unique_ptr<SkStreamAsset> SkTypeface::openStream(int* ttcIndex) const {
     return this->onOpenStream(ttcIndex);
 }
 
+std::unique_ptr<SkScalerContext> SkTypeface::createScalerContext(
+        const SkScalerContextEffects& effects, const SkDescriptor* desc) const {
+    std::unique_ptr<SkScalerContext> scalerContext = this->onCreateScalerContext(effects, desc);
+    SkASSERT(scalerContext);
+    return scalerContext;
+}
+
 void SkTypeface::unicharsToGlyphs(const SkUnichar uni[], int count, SkGlyphID glyphs[]) const {
     if (count > 0 && glyphs && uni) {
         this->onCharsToGlyphs(uni, count, glyphs);
@@ -330,6 +341,10 @@ SkTypeface::LocalizedStrings* SkTypeface::createFamilyNameIterator() const {
 void SkTypeface::getFamilyName(SkString* name) const {
     SkASSERT(name);
     this->onGetFamilyName(name);
+}
+
+bool SkTypeface::getPostScriptName(SkString* name) const {
+    return this->onGetPostScriptName(name);
 }
 
 void SkTypeface::getGlyphToUnicodeMap(SkUnichar* dst) const {

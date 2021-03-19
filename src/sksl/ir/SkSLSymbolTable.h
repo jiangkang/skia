@@ -8,15 +8,19 @@
 #ifndef SKSL_SYMBOLTABLE
 #define SKSL_SYMBOLTABLE
 
-#include <unordered_map>
+#include "include/private/SkSLString.h"
+#include "include/private/SkSLSymbol.h"
+#include "include/private/SkTArray.h"
+#include "include/private/SkTHash.h"
+#include "src/sksl/SkSLErrorReporter.h"
+
+#include <deque>
 #include <memory>
 #include <vector>
-#include "src/sksl/SkSLErrorReporter.h"
-#include "src/sksl/ir/SkSLSymbol.h"
 
 namespace SkSL {
 
-struct FunctionDeclaration;
+class FunctionDeclaration;
 
 /**
  * Maps identifiers to symbols. Functions, in particular, are mapped to either FunctionDeclaration
@@ -24,21 +28,48 @@ struct FunctionDeclaration;
  */
 class SymbolTable {
 public:
-    SymbolTable(ErrorReporter* errorReporter)
-    : fErrorReporter(*errorReporter) {}
+    SymbolTable(ErrorReporter* errorReporter, bool builtin)
+    : fBuiltin(builtin)
+    , fErrorReporter(*errorReporter) {}
 
-    SymbolTable(std::shared_ptr<SymbolTable> parent)
+    SymbolTable(std::shared_ptr<SymbolTable> parent, bool builtin)
     : fParent(parent)
+    , fBuiltin(builtin)
     , fErrorReporter(parent->fErrorReporter) {}
 
+    /**
+     * If the input is a built-in symbol table, returns a new empty symbol table as a child of the
+     * input table. If the input is not a built-in symbol table, returns it as-is. Built-in symbol
+     * tables must not be mutated after creation, so they must be wrapped if mutation is necessary.
+     */
+    static std::shared_ptr<SymbolTable> WrapIfBuiltin(std::shared_ptr<SymbolTable> symbolTable) {
+        if (!symbolTable) {
+            return nullptr;
+        }
+        if (!symbolTable->isBuiltin()) {
+            return symbolTable;
+        }
+        return std::make_shared<SymbolTable>(std::move(symbolTable), /*builtin=*/false);
+    }
+
+    /**
+     * Looks up the requested symbol and returns it. If a function has overloads, an
+     * UnresolvedFunction symbol (pointing to all of the candidates) will be added to the symbol
+     * table and returned.
+     */
     const Symbol* operator[](StringFragment name);
 
-    void addWithoutOwnership(StringFragment name, const Symbol* symbol);
+    /**
+     * Creates a new name for a symbol which already exists; does not take ownership of Symbol*.
+     */
+    void addAlias(StringFragment name, const Symbol* symbol);
+
+    void addWithoutOwnership(const Symbol* symbol);
 
     template <typename T>
-    const T* add(StringFragment name, std::unique_ptr<T> symbol) {
+    const T* add(std::unique_ptr<T> symbol) {
         const T* ptr = symbol.get();
-        this->addWithoutOwnership(name, ptr);
+        this->addWithoutOwnership(ptr);
         this->takeOwnershipOfSymbol(std::move(symbol));
         return ptr;
     }
@@ -57,25 +88,60 @@ public:
         return ptr;
     }
 
-    const String* takeOwnershipOfString(std::unique_ptr<String> n);
+    /**
+     * Given type = `float` and arraySize = 5, creates the array type `float[5]` in the symbol
+     * table. The created array type is returned. `kUnsizedArray` can be passed as a `[]` dimension.
+     * If zero is passed, the base type is returned unchanged.
+     */
+    const Type* addArrayDimension(const Type* type, int arraySize);
 
-    std::unordered_map<StringFragment, const Symbol*>::iterator begin();
+    // Call fn for every symbol in the table.  You may not mutate anything.
+    template <typename Fn>
+    void foreach(Fn&& fn) const {
+        fSymbols.foreach(
+                [&fn](const SymbolKey& key, const Symbol* symbol) { fn(key.fName, symbol); });
+    }
 
-    std::unordered_map<StringFragment, const Symbol*>::iterator end();
+    size_t count() {
+        return fSymbols.count();
+    }
+
+    /** Returns true if this is a built-in SymbolTable. */
+    bool isBuiltin() const {
+        return fBuiltin;
+    }
+
+    const String* takeOwnershipOfString(String n);
 
     std::shared_ptr<SymbolTable> fParent;
 
     std::vector<std::unique_ptr<const Symbol>> fOwnedSymbols;
 
 private:
+    struct SymbolKey {
+        StringFragment fName;
+        uint32_t       fHash;
+
+        bool operator==(const SymbolKey& that) const { return fName == that.fName; }
+        bool operator!=(const SymbolKey& that) const { return fName != that.fName; }
+        struct Hash {
+            uint32_t operator()(const SymbolKey& key) const { return key.fHash; }
+        };
+    };
+
+    static SymbolKey MakeSymbolKey(StringFragment name) {
+        return SymbolKey{name, SkOpts::hash_fn(name.data(), name.size(), 0)};
+    }
+
+    const Symbol* lookup(SymbolTable* writableSymbolTable, const SymbolKey& key);
+
     static std::vector<const FunctionDeclaration*> GetFunctions(const Symbol& s);
 
+    bool fBuiltin = false;
     std::vector<std::unique_ptr<IRNode>> fOwnedNodes;
-
-    std::vector<std::unique_ptr<String>> fOwnedStrings;
-
-    std::unordered_map<StringFragment, const Symbol*> fSymbols;
-
+    // A deque is used here because insertion is guaranteed not to invalidate the pointers inside.
+    std::deque<String> fOwnedStrings;
+    SkTHashMap<SymbolKey, const Symbol*, SymbolKey::Hash> fSymbols;
     ErrorReporter& fErrorReporter;
 
     friend class Dehydrator;

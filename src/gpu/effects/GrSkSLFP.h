@@ -10,17 +10,8 @@
 
 #include "include/core/SkRefCnt.h"
 #include "include/gpu/GrContextOptions.h"
-#include "src/gpu/GrCaps.h"
 #include "src/gpu/GrFragmentProcessor.h"
-#include "src/sksl/SkSLCompiler.h"
-#include "src/sksl/SkSLPipelineStageCodeGenerator.h"
 #include <atomic>
-
-#if GR_TEST_UTILS
-#define GR_FP_SRC_STRING const char*
-#else
-#define GR_FP_SRC_STRING static const char*
-#endif
 
 class GrContext_Base;
 class GrShaderCaps;
@@ -45,23 +36,20 @@ public:
 
     std::unique_ptr<GrFragmentProcessor> clone() const override;
 
-    bool usesExplicitReturn() const override { return true; }
-
 private:
     using ShaderErrorHandler = GrContextOptions::ShaderErrorHandler;
 
-    GrSkSLFP(sk_sp<const GrShaderCaps> shaderCaps, ShaderErrorHandler* shaderErrorHandler,
-             sk_sp<SkRuntimeEffect> effect, const char* name, sk_sp<SkData> uniforms);
+    GrSkSLFP(ShaderErrorHandler* shaderErrorHandler, sk_sp<SkRuntimeEffect> effect,
+             const char* name, sk_sp<SkData> uniforms);
 
     GrSkSLFP(const GrSkSLFP& other);
 
-    GrGLSLFragmentProcessor* onCreateGLSLInstance() const override;
+    std::unique_ptr<GrGLSLFragmentProcessor> onMakeProgramImpl() const override;
 
     void onGetGLSLProcessorKey(const GrShaderCaps&, GrProcessorKeyBuilder*) const override;
 
     bool onIsEqual(const GrFragmentProcessor&) const override;
 
-    sk_sp<const GrShaderCaps> fShaderCaps;
     ShaderErrorHandler*       fShaderErrorHandler;
 
     sk_sp<SkRuntimeEffect> fEffect;

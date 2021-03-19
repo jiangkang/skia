@@ -9,11 +9,12 @@
 #include "include/gpu/GrBackendSurface.h"
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/vk/GrVkTypes.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrTexture.h"
 #include "src/gpu/GrTextureProxy.h"
 #include "src/image/SkImage_Base.h"
 #include "tests/Test.h"
+#include "tools/gpu/ProxyUtils.h"
 
 #ifdef SK_VULKAN
 #include "src/gpu/vk/GrVkGpu.h"
@@ -61,14 +62,15 @@ DEF_GPUTEST_FOR_VULKAN_CONTEXT(VkBackendSurfaceMutableStateTest, reporter, ctxIn
                                                            kRGBA_8888_SkColorType,
                                                            kPremul_SkAlphaType, nullptr);
 
-    const GrSurfaceProxyView* view = as_IB(wrappedImage)->view(dContext);
-    REPORTER_ASSERT(reporter, view);
-    REPORTER_ASSERT(reporter, view->proxy()->isInstantiated());
-    GrTexture* texture = view->proxy()->peekTexture();
+    GrSurfaceProxy* proxy = sk_gpu_test::GetTextureImageProxy(wrappedImage.get(), dContext);
+
+    REPORTER_ASSERT(reporter, proxy);
+    REPORTER_ASSERT(reporter, proxy->isInstantiated());
+    GrTexture* texture = proxy->peekTexture();
     REPORTER_ASSERT(reporter, texture);
 
     // Verify that modifying the layout via the GrVkTexture is reflected in the GrBackendTexture
-    GrVkTexture* vkTexture = static_cast<GrVkTexture*>(texture);
+    GrVkAttachment* vkTexture = static_cast<GrVkTexture*>(texture)->textureAttachment();
     REPORTER_ASSERT(reporter, initLayout == vkTexture->currentLayout());
     REPORTER_ASSERT(reporter, initQueue == vkTexture->currentQueueFamilyIndex());
     vkTexture->updateImageLayout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -107,18 +109,31 @@ DEF_GPUTEST_FOR_VULKAN_CONTEXT(VkBackendSurfaceMutableStateTest, reporter, ctxIn
     // real transitions to the image so we need to be careful about doing actual valid transitions.
     GrVkGpu* gpu = static_cast<GrVkGpu*>(dContext->priv().getGpu());
 
-    dContext->setBackendTextureState(backendTex, newState);
+    GrBackendSurfaceMutableState previousState;
+
+    dContext->setBackendTextureState(backendTex, newState, &previousState);
 
     REPORTER_ASSERT(reporter, backendTex.getVkImageInfo(&info));
     REPORTER_ASSERT(reporter, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL == info.fImageLayout);
     REPORTER_ASSERT(reporter, gpu->queueIndex() == info.fCurrentQueueFamily);
+
+    REPORTER_ASSERT(reporter, previousState.isValid());
+    REPORTER_ASSERT(reporter, previousState.backend() == GrBackendApi::kVulkan);
+    REPORTER_ASSERT(reporter, previousState.getVkImageLayout() == initLayout);
+    REPORTER_ASSERT(reporter, previousState.getQueueFamilyIndex() == initQueue);
 
     // Make sure passing in VK_IMAGE_LAYOUT_UNDEFINED does not change the layout
     GrBackendSurfaceMutableState noopState(VK_IMAGE_LAYOUT_UNDEFINED, VK_QUEUE_FAMILY_IGNORED);
-    dContext->setBackendTextureState(backendTex, noopState);
+    dContext->setBackendTextureState(backendTex, noopState, &previousState);
     REPORTER_ASSERT(reporter, backendTex.getVkImageInfo(&info));
     REPORTER_ASSERT(reporter, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL == info.fImageLayout);
     REPORTER_ASSERT(reporter, gpu->queueIndex() == info.fCurrentQueueFamily);
+
+    REPORTER_ASSERT(reporter, previousState.isValid());
+    REPORTER_ASSERT(reporter, previousState.backend() == GrBackendApi::kVulkan);
+    REPORTER_ASSERT(reporter,
+                    previousState.getVkImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    REPORTER_ASSERT(reporter, previousState.getQueueFamilyIndex() == gpu->queueIndex());
 
     // To test queue transitions, we don't have any other valid queue available so instead we try
     // to transition to external queue.
@@ -126,22 +141,33 @@ DEF_GPUTEST_FOR_VULKAN_CONTEXT(VkBackendSurfaceMutableStateTest, reporter, ctxIn
         GrBackendSurfaceMutableState externalState(VK_IMAGE_LAYOUT_GENERAL,
                                                    VK_QUEUE_FAMILY_EXTERNAL);
 
-        dContext->setBackendTextureState(backendTex, externalState);
+        dContext->setBackendTextureState(backendTex, externalState, &previousState);
 
         REPORTER_ASSERT(reporter, backendTex.getVkImageInfo(&info));
         REPORTER_ASSERT(reporter, VK_IMAGE_LAYOUT_GENERAL == info.fImageLayout);
         REPORTER_ASSERT(reporter, VK_QUEUE_FAMILY_EXTERNAL == info.fCurrentQueueFamily);
+
+        REPORTER_ASSERT(reporter, previousState.isValid());
+        REPORTER_ASSERT(reporter, previousState.backend() == GrBackendApi::kVulkan);
+        REPORTER_ASSERT(reporter,
+                previousState.getVkImageLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        REPORTER_ASSERT(reporter, previousState.getQueueFamilyIndex() == gpu->queueIndex());
 
         dContext->submit();
 
         // Go back to the initial queue. Also we should stay in VK_IMAGE_LAYOUT_GENERAL since we
         // are passing in VK_IMAGE_LAYOUT_UNDEFINED
         GrBackendSurfaceMutableState externalState2(VK_IMAGE_LAYOUT_UNDEFINED, initQueue);
-        dContext->setBackendTextureState(backendTex, externalState2);
+        dContext->setBackendTextureState(backendTex, externalState2, &previousState);
 
         REPORTER_ASSERT(reporter, backendTex.getVkImageInfo(&info));
         REPORTER_ASSERT(reporter, VK_IMAGE_LAYOUT_GENERAL == info.fImageLayout);
         REPORTER_ASSERT(reporter, gpu->queueIndex() == info.fCurrentQueueFamily);
+
+        REPORTER_ASSERT(reporter, previousState.isValid());
+        REPORTER_ASSERT(reporter, previousState.backend() == GrBackendApi::kVulkan);
+        REPORTER_ASSERT(reporter, previousState.getVkImageLayout() == VK_IMAGE_LAYOUT_GENERAL);
+        REPORTER_ASSERT(reporter, previousState.getQueueFamilyIndex() == VK_QUEUE_FAMILY_EXTERNAL);
     }
 
     // We must submit this work before we try to delete the backend texture.

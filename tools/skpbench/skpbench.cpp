@@ -18,7 +18,7 @@
 #include "src/core/SkOSFile.h"
 #include "src/core/SkTaskGroup.h"
 #include "src/gpu/GrCaps.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/SkGr.h"
 #include "src/utils/SkMultiPictureDocument.h"
 #include "src/utils/SkOSPath.h"
@@ -34,7 +34,7 @@
 #include "tools/gpu/GrContextFactory.h"
 
 #ifdef SK_XML
-#include "experimental/svg/model/SkSVGDOM.h"
+#include "modules/svg/include/SkSVGDOM.h"
 #include "src/xml/SkDOM.h"
 #endif
 
@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <vector>
 
@@ -77,6 +78,7 @@ static DEFINE_string(png, "", "if set, save a .png proof to disk at this file lo
 static DEFINE_int(verbosity, 4, "level of verbosity (0=none to 5=debug)");
 static DEFINE_bool(suppressHeader, false, "don't print a header row before the results");
 static DEFINE_double(scale, 1, "Scale the size of the canvas and the zoom level by this factor.");
+static DEFINE_bool(dumpSamples, false, "print the individual samples to stdout");
 
 static const char header[] =
 "   accum    median       max       min   stddev  samples  sample_ms  clock  metric  config    bench";
@@ -269,11 +271,13 @@ static void run_ddl_benchmark(sk_gpu_test::TestContext* testContext, GrDirectCon
 
     promiseImageHelper.uploadAllToGPU(nullptr, context);
 
-    DDLTileHelper tiles(context, dstCharacterization, viewport, FLAGS_ddlTilingWidthHeight);
+    DDLTileHelper tiles(context, dstCharacterization, viewport,
+                        FLAGS_ddlTilingWidthHeight, FLAGS_ddlTilingWidthHeight,
+                        /* addRandomPaddingToDst */ false);
 
     tiles.createBackendTextures(nullptr, context);
 
-    tiles.createSKPPerTile(compressedPictureData.get(), promiseImageHelper);
+    tiles.createSKP(context->threadSafeProxy(), compressedPictureData.get(), promiseImageHelper);
 
     // In comparable modes, there is no GPU thread. The following pointers are all null.
     // Otherwise, we transfer testContext onto the GPU thread until after the bench.
@@ -445,6 +449,14 @@ void print_result(const std::vector<Sample>& samples, const char* config, const 
         exitf(ExitErr::kSoftware, "attempted to gather stats on even number of samples");
     }
 
+    if (FLAGS_dumpSamples) {
+        printf("Samples: ");
+        for (const Sample& sample : samples) {
+            printf("%" PRId64 " ", static_cast<int64_t>(sample.fDuration.count()));
+        }
+        printf("%s\n", bench);
+    }
+
     Sample accum = Sample();
     std::vector<double> values;
     values.reserve(samples.size());
@@ -554,6 +566,7 @@ int main(int argc, char** argv) {
     // Create a context.
     GrContextOptions ctxOptions;
     SetCtxOptionsFromCommonFlags(&ctxOptions);
+    ctxOptions.fAlwaysAntialias = config->getUseDMSAA();
     sk_gpu_test::GrContextFactory factory(ctxOptions);
     sk_gpu_test::ContextInfo ctxInfo =
         factory.getContextInfo(config->getContextType(), config->getContextOverrides());
@@ -589,8 +602,7 @@ int main(int argc, char** argv) {
     SkImageInfo info =
             SkImageInfo::Make(width, height, config->getColorType(), config->getAlphaType(),
                               sk_ref_sp(config->getColorSpace()));
-    uint32_t flags = config->getUseDIText() ? SkSurfaceProps::kUseDeviceIndependentFonts_Flag : 0;
-    SkSurfaceProps props(flags, SkSurfaceProps::kLegacyFontHost_InitType);
+    SkSurfaceProps props(config->getSurfaceFlags(), kRGB_H_SkPixelGeometry);
     sk_sp<SkSurface> surface =
         SkSurface::MakeRenderTarget(ctx, SkBudgeted::kNo, info, config->getSamples(), &props);
     if (!surface) {
@@ -693,11 +705,7 @@ static sk_sp<SkPicture> create_warmup_skp() {
 
 static sk_sp<SkPicture> create_skp_from_svg(SkStream* stream, const char* filename) {
 #ifdef SK_XML
-    SkDOM xml;
-    if (!xml.build(*stream)) {
-        exitf(ExitErr::kData, "failed to parse xml in file %s", filename);
-    }
-    sk_sp<SkSVGDOM> svg = SkSVGDOM::MakeFromDOM(xml);
+    sk_sp<SkSVGDOM> svg = SkSVGDOM::MakeFromStream(*stream);
     if (!svg) {
         exitf(ExitErr::kData, "failed to build svg dom from file %s", filename);
     }

@@ -10,7 +10,7 @@
 #include "src/gpu/GrAppliedClip.h"
 #include "src/gpu/GrCaps.h"
 #include "src/gpu/GrGpu.h"
-#include "src/gpu/GrRenderTargetContext.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/GrXferProcessor.h"
 
 #include "src/gpu/ops/GrOp.h"
@@ -28,7 +28,6 @@ GrPipeline::GrPipeline(const InitArgs& args,
     }
 
     fWindowRectsState = hardClip.windowRectsState();
-    this->setUserStencil(args.fUserStencil);
 
     fXferProcessor = std::move(xferProcessor);
 
@@ -74,8 +73,7 @@ GrXferBarrierType GrPipeline::xferBarrierType(const GrCaps& caps) const {
 GrPipeline::GrPipeline(GrScissorTest scissorTest,
                        sk_sp<const GrXferProcessor> xp,
                        const GrSwizzle& writeSwizzle,
-                       InputFlags inputFlags,
-                       const GrUserStencilSettings* userStencil)
+                       InputFlags inputFlags)
         : fWindowRectsState()
         , fFlags((Flags)inputFlags)
         , fXferProcessor(std::move(xp))
@@ -83,7 +81,6 @@ GrPipeline::GrPipeline(GrScissorTest scissorTest,
     if (GrScissorTest::kEnabled == scissorTest) {
         fFlags |= Flags::kScissorTestEnabled;
     }
-    this->setUserStencil(userStencil);
 }
 
 void GrPipeline::genKey(GrProcessorKeyBuilder* b, const GrCaps& caps) const {

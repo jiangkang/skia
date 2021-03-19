@@ -10,7 +10,6 @@
 
 #include "include/gpu/GrTypes.h"
 #include "include/gpu/d3d/GrD3DTypes.h"
-#include "include/private/SkColorData.h"
 #include "src/gpu/GrManagedResource.h"
 #include "src/gpu/GrRingBuffer.h"
 #include "src/gpu/d3d/GrD3DRootSignature.h"
@@ -24,7 +23,7 @@ class GrD3DConstantRingBuffer;
 class GrD3DPipelineState;
 class GrD3DRenderTarget;
 class GrD3DRootSignature;
-class GrD3DStencilAttachment;
+class GrD3DAttachment;
 class GrD3DTexture;
 class GrD3DTextureResource;
 
@@ -172,9 +171,11 @@ public:
     void executeIndirect(const sk_sp<GrD3DCommandSignature> commandSig, unsigned int maxCommandCnt,
                          const GrD3DBuffer* argumentBuffer, size_t argumentBufferOffset);
 
-    void clearRenderTargetView(const GrD3DRenderTarget* renderTarget, const SkPMColor4f& color,
+    void clearRenderTargetView(const GrD3DRenderTarget* renderTarget,
+                               std::array<float, 4> color,
                                const D3D12_RECT* rect);
-    void clearDepthStencilView(const GrD3DStencilAttachment*, uint8_t stencilClearValue,
+    void clearDepthStencilView(const GrD3DAttachment*,
+                               uint8_t stencilClearValue,
                                const D3D12_RECT* rect);
     void setRenderTarget(const GrD3DRenderTarget* renderTarget);
     void resolveSubresourceRegion(const GrD3DTextureResource* dstTexture,

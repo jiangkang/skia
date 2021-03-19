@@ -13,7 +13,7 @@
 
 #include <set>
 
-#if defined(SKSL_STANDALONE) || defined(GR_TEST_UTILS)
+#if defined(SKSL_STANDALONE) || GR_TEST_UTILS
 
 namespace SkSL {
 
@@ -25,9 +25,11 @@ public:
     bool generateCode() override;
 
 private:
-    void writef(const char* s, va_list va) SKSL_PRINTF_LIKE(2, 0);
+    using Precedence = Operator::Precedence;
 
-    void writef(const char* s, ...) SKSL_PRINTF_LIKE(2, 3);
+    void writef(const char* s, va_list va) SK_PRINTF_LIKE(2, 0);
+
+    void writef(const char* s, ...) SK_PRINTF_LIKE(2, 3);
 
     bool writeSection(const char* name, const char* prefix = "");
 
@@ -43,8 +45,6 @@ private:
 
     void writeSwizzle(const Swizzle& swizzle) override;
 
-    void writeFieldAccess(const FieldAccess& access) override;
-
     void writeVariableReference(const VariableReference& ref) override;
 
     String getSamplerHandle(const Variable& var);
@@ -55,9 +55,15 @@ private:
 
     void writeSwitchStatement(const SwitchStatement& s) override;
 
+    String getSampleVarName(const char* prefix, int sampleCounter);
+
     void writeFunctionCall(const FunctionCall& c) override;
 
     void writeFunction(const FunctionDefinition& f) override;
+
+    void prepareHelperFunction(const FunctionDeclaration& decl);
+
+    void prototypeHelperFunction(const FunctionDeclaration& decl);
 
     void writeSetting(const Setting& s) override;
 
@@ -79,6 +85,8 @@ private:
     void writePrivateVarValues();
 
     void writeCodeAppend(const String& code);
+
+    String assembleCodeAndFormatArgPrintf(const String& code);
 
     bool writeEmitCode(std::vector<const Variable*>& uniforms);
 
@@ -119,15 +127,6 @@ private:
     // Append CPP code to the current extra emit code block.
     void addExtraEmitCodeLine(const String& toAppend);
 
-    // Called when we encounter `sk_OutColor = xxxxx` or `return xxxxx` during the parse. If both
-    // return types are encountered in a single file, an error is generated.
-    enum class ReturnType {
-        kNothing,
-        kUsesExplicitReturn,
-        kUsesSkOutColor
-    };
-    void setReturnType(int offset, ReturnType typeToSet);
-
     int getChildFPIndex(const Variable& var) const;
 
     String fName;
@@ -146,8 +145,8 @@ private:
     // True while compiling the main() function of the FP.
     bool fInMain = false;
 
-    // Keeps track of how main() returns a color to the caller. An FP file cannot mix return types.
-    ReturnType fReturnType = ReturnType::kNothing;
+    // Gives unique but predictable names to invocations of sample().
+    int fSampleCounter = 0;
 
     // if not null, we are accumulating SkSL for emitCode into fOut, which
     // replaced the original buffer with a StringStream. The original buffer is
@@ -159,6 +158,6 @@ private:
 
 }  // namespace SkSL
 
-#endif // defined(SKSL_STANDALONE) || defined(GR_TEST_UTILS)
+#endif // defined(SKSL_STANDALONE) || GR_TEST_UTILS
 
 #endif // SKSL_CPPCODEGENERATOR

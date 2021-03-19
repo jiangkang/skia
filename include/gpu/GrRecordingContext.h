@@ -16,14 +16,16 @@ class GrAuditTrail;
 class GrBackendFormat;
 class GrDrawingManager;
 class GrOnFlushCallbackObject;
-class GrOpMemoryPool;
+class GrMemoryPool;
 class GrProgramDesc;
 class GrProgramInfo;
+class GrProxyProvider;
 class GrRecordingContextPriv;
+class GrSubRunAllocator;
 class GrSurfaceContext;
 class GrSurfaceProxy;
 class GrTextBlobCache;
-class GrThreadSafeUniquelyKeyedProxyViewCache;
+class GrThreadSafeCache;
 class SkArenaAlloc;
 class SkJSONWriter;
 
@@ -94,17 +96,17 @@ public:
     // GrRecordingContext. Arenas does not maintain ownership of the pools it groups together.
     class Arenas {
     public:
-        Arenas(GrOpMemoryPool*, SkArenaAlloc*);
-
-        // For storing GrOp-derived classes recorded by a GrRecordingContext
-        GrOpMemoryPool* opMemoryPool() { return fOpMemoryPool; }
+        Arenas(SkArenaAlloc*, GrSubRunAllocator*);
 
         // For storing pipelines and other complex data as-needed by ops
         SkArenaAlloc* recordTimeAllocator() { return fRecordTimeAllocator; }
 
+        // For storing GrTextBlob SubRuns
+        GrSubRunAllocator* recordTimeSubRunAllocator() { return fRecordTimeSubRunAllocator; }
+
     private:
-        GrOpMemoryPool* fOpMemoryPool;
-        SkArenaAlloc*   fRecordTimeAllocator;
+        SkArenaAlloc* fRecordTimeAllocator;
+        GrSubRunAllocator* fRecordTimeSubRunAllocator;
     };
 
 protected:
@@ -123,12 +125,13 @@ protected:
         OwnedArenas& operator=(OwnedArenas&&);
 
     private:
-        std::unique_ptr<GrOpMemoryPool> fOpMemoryPool;
-        std::unique_ptr<SkArenaAlloc>   fRecordTimeAllocator;
+        std::unique_ptr<SkArenaAlloc> fRecordTimeAllocator;
+        std::unique_ptr<GrSubRunAllocator> fRecordTimeSubRunAllocator;
     };
 
     GrRecordingContext(sk_sp<GrContextThreadSafeProxy>);
-    void setupDrawingManager(bool sortOpsTasks, bool reduceOpsTaskSplitting);
+
+    bool init() override;
 
     void abandonContext() override;
 
@@ -142,6 +145,9 @@ protected:
     // This entry point should only be used for DDL creation where we want the ops' lifetime to
     // match that of the DDL.
     OwnedArenas&& detachArenas();
+
+    GrProxyProvider* proxyProvider() { return fProxyProvider.get(); }
+    const GrProxyProvider* proxyProvider() const { return fProxyProvider.get(); }
 
     struct ProgramData {
         ProgramData(std::unique_ptr<const GrProgramDesc>, const GrProgramInfo*);
@@ -174,8 +180,8 @@ protected:
     GrTextBlobCache* getTextBlobCache();
     const GrTextBlobCache* getTextBlobCache() const;
 
-    GrThreadSafeUniquelyKeyedProxyViewCache* threadSafeViewCache();
-    const GrThreadSafeUniquelyKeyedProxyViewCache* threadSafeViewCache() const;
+    GrThreadSafeCache* threadSafeCache();
+    const GrThreadSafeCache* threadSafeCache() const;
 
     /**
      * Registers an object for flush-related callbacks. (See GrOnFlushCallbackObject.)
@@ -227,13 +233,15 @@ protected:
     void dumpJSON(SkJSONWriter*) const;
 
 private:
+    // Delete last in case other objects call it during destruction.
+    std::unique_ptr<GrAuditTrail>     fAuditTrail;
+
     OwnedArenas                       fArenas;
 
     std::unique_ptr<GrDrawingManager> fDrawingManager;
+    std::unique_ptr<GrProxyProvider>  fProxyProvider;
 
-    std::unique_ptr<GrAuditTrail>     fAuditTrail;
-
-#ifdef GR_TEST_UTILS
+#if GR_TEST_UTILS
     int fSuppressWarningMessages = 0;
 #endif
 

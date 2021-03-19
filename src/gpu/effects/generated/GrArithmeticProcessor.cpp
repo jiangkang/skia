@@ -28,26 +28,27 @@ public:
         (void)k;
         auto enforcePMColor = _outer.enforcePMColor;
         (void)enforcePMColor;
-        kVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag, kFloat4_GrSLType,
-                                                "k");
-        SkString _sample385 = this->invokeChild(0, args);
+        kVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kFloat4_GrSLType, "k");
+        SkString _sample0 = this->invokeChild(0, args);
         fragBuilder->codeAppendf(
-                R"SkSL(half4 src = %s;)SkSL", _sample385.c_str());
-        SkString _sample416 = this->invokeChild(1, args);
+                R"SkSL(half4 src = %s;)SkSL", _sample0.c_str());
+        SkString _sample1 = this->invokeChild(1, args);
         fragBuilder->codeAppendf(
                 R"SkSL(
 half4 dst = %s;
-%s = clamp((((half(%s.x) * src) * dst + half(%s.y) * src) + half(%s.z) * dst) + half(%s.w), 0.0, 1.0);
+half4 color = clamp((((half(%s.x) * src) * dst + half(%s.y) * src) + half(%s.z) * dst) + half(%s.w), 0.0, 1.0);
 @if (%s) {
-    %s.xyz = min(%s.xyz, %s.w);
+    color.xyz = min(color.xyz, color.w);
 }
+return color;
 )SkSL",
-                _sample416.c_str(), args.fOutputColor, args.fUniformHandler->getUniformCStr(kVar),
+                _sample1.c_str(),
                 args.fUniformHandler->getUniformCStr(kVar),
                 args.fUniformHandler->getUniformCStr(kVar),
                 args.fUniformHandler->getUniformCStr(kVar),
-                (_outer.enforcePMColor ? "true" : "false"), args.fOutputColor, args.fOutputColor,
-                args.fOutputColor);
+                args.fUniformHandler->getUniformCStr(kVar),
+                (_outer.enforcePMColor ? "true" : "false"));
     }
 
 private:
@@ -58,12 +59,12 @@ private:
     }
     UniformHandle kVar;
 };
-GrGLSLFragmentProcessor* GrArithmeticProcessor::onCreateGLSLInstance() const {
-    return new GrGLSLArithmeticProcessor();
+std::unique_ptr<GrGLSLFragmentProcessor> GrArithmeticProcessor::onMakeProgramImpl() const {
+    return std::make_unique<GrGLSLArithmeticProcessor>();
 }
 void GrArithmeticProcessor::onGetGLSLProcessorKey(const GrShaderCaps& caps,
                                                   GrProcessorKeyBuilder* b) const {
-    b->add32((uint32_t)enforcePMColor);
+    b->addBool(enforcePMColor, "enforcePMColor");
 }
 bool GrArithmeticProcessor::onIsEqual(const GrFragmentProcessor& other) const {
     const GrArithmeticProcessor& that = other.cast<GrArithmeticProcessor>();
@@ -72,7 +73,6 @@ bool GrArithmeticProcessor::onIsEqual(const GrFragmentProcessor& other) const {
     if (enforcePMColor != that.enforcePMColor) return false;
     return true;
 }
-bool GrArithmeticProcessor::usesExplicitReturn() const { return false; }
 GrArithmeticProcessor::GrArithmeticProcessor(const GrArithmeticProcessor& src)
         : INHERITED(kGrArithmeticProcessor_ClassID, src.optimizationFlags())
         , k(src.k)
@@ -84,7 +84,11 @@ std::unique_ptr<GrFragmentProcessor> GrArithmeticProcessor::clone() const {
 }
 #if GR_TEST_UTILS
 SkString GrArithmeticProcessor::onDumpInfo() const {
-    return SkStringPrintf("(k=float4(%f, %f, %f, %f), enforcePMColor=%s)", k.x, k.y, k.z, k.w,
+    return SkStringPrintf("(k=float4(%f, %f, %f, %f), enforcePMColor=%s)",
+                          k.x,
+                          k.y,
+                          k.z,
+                          k.w,
                           (enforcePMColor ? "true" : "false"));
 }
 #endif
@@ -92,8 +96,9 @@ GR_DEFINE_FRAGMENT_PROCESSOR_TEST(GrArithmeticProcessor);
 #if GR_TEST_UTILS
 std::unique_ptr<GrFragmentProcessor> GrArithmeticProcessor::TestCreate(GrProcessorTestData* d) {
     return GrArithmeticProcessor::Make(
-            GrProcessorUnitTest::MakeChildFP(d), GrProcessorUnitTest::MakeChildFP(d),
-            ArithmeticFPInputs{d->fRandom->nextF(), d->fRandom->nextF(), d->fRandom->nextF(),
-                               d->fRandom->nextF(), d->fRandom->nextBool()});
+            GrProcessorUnitTest::MakeChildFP(d),
+            GrProcessorUnitTest::MakeChildFP(d),
+            {d->fRandom->nextF(), d->fRandom->nextF(), d->fRandom->nextF(), d->fRandom->nextF()},
+            d->fRandom->nextBool());
 }
 #endif

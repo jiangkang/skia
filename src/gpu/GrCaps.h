@@ -105,8 +105,6 @@ public:
 
     bool preferVRAMUseOverFlushes() const { return fPreferVRAMUseOverFlushes; }
 
-    bool preferTrianglesOverSampleMask() const { return fPreferTrianglesOverSampleMask; }
-
     bool avoidStencilBuffers() const { return fAvoidStencilBuffers; }
 
     bool avoidWritePixelsFastPath() const { return fAvoidWritePixelsFastPath; }
@@ -156,6 +154,12 @@ public:
         return fShouldCollapseSrcOverToSrcWhenAble;
     }
 
+    // When abandoning the GrDirectContext do we need to sync the GPU before we start abandoning
+    // resources.
+    bool mustSyncGpuDuringAbandon() const {
+        return fMustSyncGpuDuringAbandon;
+    }
+
     /**
      * Indicates whether GPU->CPU memory mapping for GPU resources such as vertex buffers and
      * textures allows partial mappings or full mappings.
@@ -170,6 +174,11 @@ public:
                                      //   submitted to GrGpu.
     };
 
+    // This returns the general mapping support for the GPU. However, even if this returns a flag
+    // that says buffers can be mapped, it does NOT mean that every buffer will be mappable. Thus
+    // calls of map should still check to see if a valid pointer was returned from the map call and
+    // handle fallbacks appropriately. If this does return kNone_MapFlags then all calls to map() on
+    // any buffer will fail.
     uint32_t mapBufferFlags() const { return fMapBufferFlags; }
 
     // Scratch textures not being reused means that those scratch textures
@@ -190,19 +199,14 @@ public:
 
     int maxTextureSize() const { return fMaxTextureSize; }
 
-    /** This is the maximum tile size to use by GPU devices for rendering sw-backed images/bitmaps.
-        It is usually the max texture size, unless we're overriding it for testing. */
-    int maxTileSize() const {
-        SkASSERT(fMaxTileSize <= fMaxTextureSize);
-        return fMaxTileSize;
-    }
-
     int maxWindowRectangles() const { return fMaxWindowRectangles; }
 
     // Returns whether mixed samples is supported for the given backend render target.
     bool isWindowRectanglesSupportedForRT(const GrBackendRenderTarget& rt) const {
         return this->maxWindowRectangles() > 0 && this->onIsWindowRectanglesSupportedForRT(rt);
     }
+
+    uint32_t maxPushConstantsSize() const { return fMaxPushConstantsSize; }
 
     virtual bool isFormatSRGB(const GrBackendFormat&) const = 0;
 
@@ -234,10 +238,6 @@ public:
     // sample count is 1 then 1 will be returned if non-MSAA rendering is supported, otherwise 0.
     // For historical reasons requestedCount==0 is handled identically to requestedCount==1.
     virtual int getRenderTargetSampleCount(int requestedCount, const GrBackendFormat&) const = 0;
-
-    // Returns the number of bytes per pixel for the given GrBackendFormat. This is only supported
-    // for "normal" formats. For compressed formats this will return 0.
-    virtual size_t bytesPerPixel(const GrBackendFormat&) const = 0;
 
     /**
      * Backends may have restrictions on what types of surfaces support GrGpu::writePixels().
@@ -375,13 +375,11 @@ public:
     /// op instead of using glClear seems to resolve the issue.
     bool performStencilClearsAsDraws() const { return fPerformStencilClearsAsDraws; }
 
-    // Can we use coverage counting shortcuts to render paths? Coverage counting can cause artifacts
-    // along shared edges if care isn't taken to ensure both contours wind in the same direction.
-    bool allowCoverageCounting() const { return fAllowCoverageCounting; }
+    // Should we disable the clip mask atlas due to a faulty driver?
+    bool driverDisableMSAAClipAtlas() const { return fDriverDisableMSAAClipAtlas; }
 
-    // Should we disable the CCPR code due to a faulty driver?
-    bool driverDisableCCPR() const { return fDriverDisableCCPR; }
-    bool driverDisableMSAACCPR() const { return fDriverDisableMSAACCPR; }
+    // Should we disable GrTessellationPathRenderer due to a faulty driver?
+    bool disableTessellationPathRenderer() const { return fDisableTessellationPathRenderer; }
 
     // Returns how to sample the dst values for the passed in GrRenderTargetProxy.
     GrDstSampleType getDstSampleTypeForProxy(const GrRenderTargetProxy*) const;
@@ -447,7 +445,24 @@ public:
                                     GrSamplerState,
                                     const GrBackendFormat&) const {}
 
-    virtual GrProgramDesc makeDesc(GrRenderTarget*, const GrProgramInfo&) const = 0;
+    enum class ProgramDescOverrideFlags {
+        kNone = 0,
+        // If using discardable msaa surfaces in vulkan, when we break up a render pass for an
+        // inline upload, we must do a load msaa subpass for the second render pass. However, if the
+        // original render pass did not have this load subpass (e.g. clear or discard load op), then
+        // all the GrProgramInfos for draws that end up in the second render pass will have been
+        // recorded thinking they will be in a render pass with only 1 subpass. Thus we add an
+        // override flag to the makeDesc call to force the actually VkPipeline that gets created to
+        // be created using a render pass with 2 subpasses. We do miss on the pre-compile with this
+        // approach, but inline uploads are very rare and already slow.
+        kVulkanHasResolveLoadSubpass = 0x1,
+    };
+    GR_DECL_BITFIELD_CLASS_OPS_FRIENDS(ProgramDescOverrideFlags);
+
+
+    virtual GrProgramDesc makeDesc(
+            GrRenderTarget*, const GrProgramInfo&,
+            ProgramDescOverrideFlags overrideFlags = ProgramDescOverrideFlags::kNone) const = 0;
 
     // This method specifies, for each backend, the extra properties of a RT when Ganesh creates one
     // internally. For example, for Vulkan, Ganesh always creates RTs that can be used as input
@@ -502,16 +517,16 @@ protected:
     bool fPerformColorClearsAsDraws                  : 1;
     bool fAvoidLargeIndexBufferDraws                 : 1;
     bool fPerformStencilClearsAsDraws                : 1;
-    bool fAllowCoverageCounting                      : 1;
     bool fTransferFromBufferToTextureSupport         : 1;
     bool fTransferFromSurfaceToBufferSupport         : 1;
     bool fWritePixelsRowBytesSupport                 : 1;
     bool fReadPixelsRowBytesSupport                  : 1;
     bool fShouldCollapseSrcOverToSrcWhenAble         : 1;
+    bool fMustSyncGpuDuringAbandon                   : 1;
 
     // Driver workaround
-    bool fDriverDisableCCPR                          : 1;
-    bool fDriverDisableMSAACCPR                      : 1;
+    bool fDriverDisableMSAAClipAtlas                 : 1;
+    bool fDisableTessellationPathRenderer            : 1;
     bool fAvoidStencilBuffers                        : 1;
     bool fAvoidWritePixelsFastPath                   : 1;
     bool fRequiresManualFBBarrierAfterTessellatedStencilDraw : 1;
@@ -519,9 +534,6 @@ protected:
 
     // ANGLE performance workaround
     bool fPreferVRAMUseOverFlushes                   : 1;
-
-    // On some platforms it's better to make more triangles than to use the sample mask (MSAA only).
-    bool fPreferTrianglesOverSampleMask              : 1;
 
     bool fFenceSyncSupport                           : 1;
     bool fSemaphoreSupport                           : 1;
@@ -543,9 +555,9 @@ protected:
     int fMaxPreferredRenderTargetSize;
     int fMaxVertexAttributes;
     int fMaxTextureSize;
-    int fMaxTileSize;
     int fMaxWindowRectangles;
     int fInternalMultisampleCount;
+    uint32_t fMaxPushConstantsSize = 0;
 
     GrDriverBugWorkarounds fDriverBugWorkarounds;
 
@@ -582,5 +594,7 @@ private:
 
     using INHERITED = SkRefCnt;
 };
+
+GR_MAKE_BITFIELD_CLASS_OPS(GrCaps::ProgramDescOverrideFlags);
 
 #endif

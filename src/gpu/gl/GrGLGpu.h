@@ -15,13 +15,14 @@
 #include "src/gpu/GrGpu.h"
 #include "src/gpu/GrNativeRect.h"
 #include "src/gpu/GrProgramDesc.h"
+#include "src/gpu/GrThreadSafePipelineBuilder.h"
 #include "src/gpu/GrWindowRectsState.h"
 #include "src/gpu/GrXferProcessor.h"
+#include "src/gpu/gl/GrGLAttachment.h"
 #include "src/gpu/gl/GrGLContext.h"
 #include "src/gpu/gl/GrGLPathRendering.h"
 #include "src/gpu/gl/GrGLProgram.h"
 #include "src/gpu/gl/GrGLRenderTarget.h"
-#include "src/gpu/gl/GrGLStencilAttachment.h"
 #include "src/gpu/gl/GrGLTexture.h"
 #include "src/gpu/gl/GrGLVertexArray.h"
 
@@ -36,6 +37,9 @@ public:
     ~GrGLGpu() override;
 
     void disconnect(DisconnectType) override;
+
+    GrThreadSafePipelineBuilder* pipelineBuilder() override;
+    sk_sp<GrThreadSafePipelineBuilder> refPipelineBuilder() override;
 
     const GrGLContext& glContext() const { return *fGLContext; }
 
@@ -74,7 +78,11 @@ public:
 
     // Flushes state from GrProgramInfo to GL. Returns false if the state couldn't be set.
     bool flushGLState(GrRenderTarget*, const GrProgramInfo&);
-    void flushScissorRect(const SkIRect&, int rtWidth, int rtHeight, GrSurfaceOrigin);
+    void flushScissorRect(const SkIRect& scissor, int rtHeight, GrSurfaceOrigin);
+
+    // The flushRenderTarget methods will all set the initial viewport to the full extent of the
+    // backing render target.
+    void flushViewport(const SkIRect& viewport, int rtHeight, GrSurfaceOrigin);
 
     // Returns the last program bound by flushGLState(), or nullptr if a different program has since
     // been put into use via some other method (e.g., resetContext, copySurfaceAsDraw).
@@ -104,7 +112,7 @@ public:
     // The GrGLOpsRenderPass does not buffer up draws before submitting them to the gpu.
     // Thus this is the implementation of the clear call for the corresponding passthrough function
     // on GrGLOpsRenderPass.
-    void clear(const GrScissorState&, const SkPMColor4f&, GrRenderTarget*, GrSurfaceOrigin);
+    void clear(const GrScissorState&, std::array<float, 4> color, GrRenderTarget*, GrSurfaceOrigin);
 
     // The GrGLOpsRenderPass does not buffer up draws before submitting them to the gpu.
     // Thus this is the implementation of the clearStencil call for the corresponding passthrough
@@ -119,39 +127,41 @@ public:
     void endCommandBuffer(GrRenderTarget*, const GrOpsRenderPass::LoadAndStoreInfo& colorLoadStore,
                           const GrOpsRenderPass::StencilLoadAndStoreInfo& stencilLoadStore);
 
-    GrOpsRenderPass* getOpsRenderPass(
-            GrRenderTarget*, GrStencilAttachment*,
-            GrSurfaceOrigin, const SkIRect&,
-            const GrOpsRenderPass::LoadAndStoreInfo&,
-            const GrOpsRenderPass::StencilLoadAndStoreInfo&,
-            const SkTArray<GrSurfaceProxy*, true>& sampledProxies,
-            GrXferBarrierFlags renderPassXferBarriers) override;
-
     void invalidateBoundRenderTarget() {
         fHWBoundRenderTargetUniqueID.makeInvalid();
     }
 
-    GrStencilAttachment* createStencilAttachmentForRenderTarget(
-            const GrRenderTarget* rt, SkISize dimensions, int numStencilSamples) override;
+    sk_sp<GrAttachment> makeStencilAttachmentForRenderTarget(const GrRenderTarget* rt,
+                                                             SkISize dimensions,
+                                                             int numStencilSamples) override;
+
+    sk_sp<GrAttachment> makeMSAAAttachment(SkISize dimensions,
+                                           const GrBackendFormat& format,
+                                           int numSamples,
+                                           GrProtected isProtected) override {
+        return nullptr;
+    }
+
     void deleteBackendTexture(const GrBackendTexture&) override;
 
     bool compile(const GrProgramDesc&, const GrProgramInfo&) override;
 
     bool precompileShader(const SkData& key, const SkData& data) override {
-        return fProgramCache->precompileShader(key, data);
+        return fProgramCache->precompileShader(this->getContext(), key, data);
     }
 
 #if GR_TEST_UTILS
     bool isTestingOnlyBackendTexture(const GrBackendTexture&) const override;
 
-    GrBackendRenderTarget createTestingOnlyBackendRenderTarget(int w, int h, GrColorType) override;
+    GrBackendRenderTarget createTestingOnlyBackendRenderTarget(SkISize dimensions,
+                                                               GrColorType,
+                                                               int sampleCnt,
+                                                               GrProtected) override;
     void deleteTestingOnlyBackendRenderTarget(const GrBackendRenderTarget&) override;
 
     const GrGLContext* glContextForTesting() const override { return &this->glContext(); }
 
     void resetShaderCacheForTesting() const override { fProgramCache->reset(); }
-
-    void testingOnly_flushGpuAndSync() override;
 #endif
 
     void submit(GrOpsRenderPass* renderPass) override;
@@ -169,6 +179,7 @@ public:
     void waitSemaphore(GrSemaphore* semaphore) override;
 
     void checkFinishProcs() override;
+    void finishOutstandingGpuWork() override;
 
     // Calls glGetError() until no errors are reported. Also looks for OOMs.
     void clearErrorsAndCheckForOOM();
@@ -250,12 +261,19 @@ private:
                                                     GrWrapOwnership,
                                                     GrWrapCacheable) override;
     sk_sp<GrRenderTarget> onWrapBackendRenderTarget(const GrBackendRenderTarget&) override;
-    sk_sp<GrRenderTarget> onWrapBackendTextureAsRenderTarget(const GrBackendTexture&,
-                                                             int sampleCnt) override;
 
     // Given a GL format return the index into the stencil format array on GrGLCaps to a
     // compatible stencil format, or negative if there is no compatible stencil format.
     int getCompatibleStencilIndex(GrGLFormat format);
+
+    GrBackendFormat getPreferredStencilFormat(const GrBackendFormat& format) override {
+        int idx = this->getCompatibleStencilIndex(format.asGLFormat());
+        if (idx < 0) {
+            return {};
+        }
+        return GrBackendFormat::MakeGL(GrGLFormatToEnum(this->glCaps().stencilFormats()[idx]),
+                                       GR_GL_TEXTURE_NONE);
+    }
 
     void onFBOChanged();
 
@@ -287,17 +305,21 @@ private:
 
     bool onTransferPixelsTo(GrTexture*, int left, int top, int width, int height,
                             GrColorType textureColorType, GrColorType bufferColorType,
-                            GrGpuBuffer* transferBuffer, size_t offset, size_t rowBytes) override;
+                            sk_sp<GrGpuBuffer> transferBuffer, size_t offset,
+                            size_t rowBytes) override;
     bool onTransferPixelsFrom(GrSurface*, int left, int top, int width, int height,
                               GrColorType surfaceColorType, GrColorType bufferColorType,
-                              GrGpuBuffer* transferBuffer, size_t offset) override;
+                              sk_sp<GrGpuBuffer> transferBuffer, size_t offset) override;
     bool readOrTransferPixelsFrom(GrSurface*, int left, int top, int width, int height,
                                   GrColorType surfaceColorType, GrColorType dstColorType,
                                   void* offsetOrPtr, int rowWidthInPixels);
 
-    // Before calling any variation of TexImage, TexSubImage, etc..., call this to ensure that the
-    // PIXEL_UNPACK_BUFFER is unbound.
-    void unbindCpuToGpuXferBuffer();
+    // Unbinds xfer buffers from GL for operations that don't need them.
+    // Before calling any variation of TexImage, TexSubImage, etc..., call this with
+    // GrGpuBufferType::kXferCpuToGpu to ensure that the PIXEL_UNPACK_BUFFER is unbound.
+    // Before calling ReadPixels and reading back into cpu memory call this with
+    // GrGpuBufferType::kXferGpuToCpu to ensure that the PIXEL_PACK_BUFFER is unbound.
+    void unbindXferBuffer(GrGpuBufferType type);
 
     void onResolveRenderTarget(GrRenderTarget* target, const SkIRect& resolveRect) override;
 
@@ -314,6 +336,15 @@ private:
     void addFinishedProc(GrGpuFinishedProc finishedProc,
                          GrGpuFinishedContext finishedContext) override;
 
+    GrOpsRenderPass* onGetOpsRenderPass(GrRenderTarget*,
+                                        GrAttachment*,
+                                        GrSurfaceOrigin,
+                                        const SkIRect&,
+                                        const GrOpsRenderPass::LoadAndStoreInfo&,
+                                        const GrOpsRenderPass::StencilLoadAndStoreInfo&,
+                                        const SkTArray<GrSurfaceProxy*, true>& sampledProxies,
+                                        GrXferBarrierFlags renderPassXferBarriers) override;
+
     bool onSubmitToGpu(bool syncCpu) override;
 
     bool waitSync(GrGLsync, uint64_t timeout, bool flush);
@@ -325,32 +356,37 @@ private:
     bool copySurfaceAsBlitFramebuffer(GrSurface* dst, GrSurface* src, const SkIRect& srcRect,
                                       const SkIPoint& dstPoint);
 
-    class ProgramCache : public ::SkNoncopyable {
+    class ProgramCache : public GrThreadSafePipelineBuilder {
     public:
-        ProgramCache(GrGLGpu* gpu);
-        ~ProgramCache();
+        ProgramCache(int runtimeProgramCacheSize);
+        ~ProgramCache() override;
 
         void abandon();
         void reset();
-        sk_sp<GrGLProgram> findOrCreateProgram(GrRenderTarget*, const GrProgramInfo&);
-        sk_sp<GrGLProgram> findOrCreateProgram(const GrProgramDesc& desc,
+        sk_sp<GrGLProgram> findOrCreateProgram(GrDirectContext*,
+                                               GrRenderTarget*,
+                                               const GrProgramInfo&);
+        sk_sp<GrGLProgram> findOrCreateProgram(GrDirectContext* dContext,
+                                               const GrProgramDesc& desc,
                                                const GrProgramInfo& programInfo,
                                                Stats::ProgramCacheResult* stat) {
-            sk_sp<GrGLProgram> tmp = this->findOrCreateProgram(nullptr, desc, programInfo, stat);
+            sk_sp<GrGLProgram> tmp = this->findOrCreateProgram(dContext, nullptr, desc,
+                                                               programInfo, stat);
             if (!tmp) {
-                fGpu->fStats.incNumPreCompilationFailures();
+                fStats.incNumPreCompilationFailures();
             } else {
-                fGpu->fStats.incNumPreProgramCacheResult(*stat);
+                fStats.incNumPreProgramCacheResult(*stat);
             }
 
             return tmp;
         }
-        bool precompileShader(const SkData& key, const SkData& data);
+        bool precompileShader(GrDirectContext*, const SkData& key, const SkData& data);
 
     private:
         struct Entry;
 
-        sk_sp<GrGLProgram> findOrCreateProgram(GrRenderTarget*,
+        sk_sp<GrGLProgram> findOrCreateProgram(GrDirectContext*,
+                                               GrRenderTarget*,
                                                const GrProgramDesc&,
                                                const GrProgramInfo&,
                                                Stats::ProgramCacheResult*);
@@ -362,22 +398,19 @@ private:
         };
 
         SkLRUCache<GrProgramDesc, std::unique_ptr<Entry>, DescHash> fMap;
-
-        GrGLGpu* fGpu;
     };
 
     void flushPatchVertexCount(uint8_t count);
 
     void flushColorWrite(bool writeColor);
-    void flushClearColor(const SkPMColor4f&);
+    void flushClearColor(std::array<float, 4>);
 
     // flushes the scissor. see the note on flushBoundTextureAndParams about
     // flushing the scissor after that function is called.
-    void flushScissor(const GrScissorState& scissorState, int rtWidth, int rtHeight,
-                      GrSurfaceOrigin rtOrigin) {
+    void flushScissor(const GrScissorState& scissorState, int rtHeight, GrSurfaceOrigin rtOrigin) {
         this->flushScissorTest(GrScissorTest(scissorState.enabled()));
         if (scissorState.enabled()) {
-            this->flushScissorRect(scissorState.rect(), rtWidth, rtHeight, rtOrigin);
+            this->flushScissorRect(scissorState.rect(), rtHeight, rtOrigin);
         }
     }
     void flushScissorTest(GrScissorTest);
@@ -400,9 +433,6 @@ private:
     void flushRenderTarget(GrGLRenderTarget*);
     // This version can be used when the render target's colors will not be written.
     void flushRenderTargetNoColorWrites(GrGLRenderTarget*);
-
-    // Need not be called if flushRenderTarget is used.
-    void flushViewport(int width, int height);
 
     void flushStencil(const GrStencilSettings&, GrSurfaceOrigin);
     void disableStencil();
@@ -491,7 +521,7 @@ private:
     std::unique_ptr<GrGLContext> fGLContext;
 
     // GL program-related state
-    std::unique_ptr<ProgramCache> fProgramCache;
+    sk_sp<ProgramCache>         fProgramCache;
 
     ///////////////////////////////////////////////////////////////////////////
     ///@name Caching of GL State
@@ -640,6 +670,7 @@ private:
     auto* hwBufferState(GrGpuBufferType type) {
         unsigned typeAsUInt = static_cast<unsigned>(type);
         SkASSERT(typeAsUInt < SK_ARRAY_COUNT(fHWBufferState));
+        SkASSERT(type != GrGpuBufferType::kUniform);
         return &fHWBufferState[typeAsUInt];
     }
 

@@ -199,6 +199,11 @@ public:
             SkTypeface*     fTypeface;
             int             fGlyphCount;
             const uint16_t* fGlyphIndices;
+#ifdef SK_UNTIL_CRBUG_1187654_IS_FIXED
+            const uint32_t* fClusterIndex_forTest;
+            int             fUtf8Size_forTest;
+            const char*     fUtf8_forTest;
+#endif
         };
 
         Iter(const SkTextBlob&);
@@ -380,24 +385,16 @@ public:
     // RunBuffer.pos points to SkRSXform array
     const RunBuffer& allocRunRSXform(const SkFont& font, int count);
 
-private:
-    const RunBuffer& allocRunText(const SkFont& font,
-                                  int count,
-                                  SkScalar x,
-                                  SkScalar y,
-                                  int textByteCount,
-                                  SkString lang,
-                                  const SkRect* bounds = nullptr);
-    const RunBuffer& allocRunTextPosH(const SkFont& font, int count, SkScalar y,
-                                      int textByteCount, SkString lang,
+    const RunBuffer& allocRunText(const SkFont& font, int count, SkScalar x, SkScalar y,
+                                  int textByteCount, const SkRect* bounds = nullptr);
+    const RunBuffer& allocRunTextPosH(const SkFont& font, int count, SkScalar y, int textByteCount,
                                       const SkRect* bounds = nullptr);
-    const RunBuffer& allocRunTextPos(const SkFont& font, int count,
-                                     int textByteCount, SkString lang,
+    const RunBuffer& allocRunTextPos(const SkFont& font, int count, int textByteCount,
                                      const SkRect* bounds = nullptr);
-    const RunBuffer& allocRunRSXform(const SkFont& font, int count,
-                                     int textByteCount, SkString lang,
-                                     const SkRect* bounds = nullptr);
+    const RunBuffer& allocRunTextRSXform(const SkFont& font, int count, int textByteCount,
+                                         const SkRect* bounds = nullptr);
 
+private:
     void reserve(size_t size);
     void allocInternal(const SkFont& font, SkTextBlob::GlyphPositioning positioning,
                        int count, int textBytes, SkPoint offset, const SkRect* bounds);

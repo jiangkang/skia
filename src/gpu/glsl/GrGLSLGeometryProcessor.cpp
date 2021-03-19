@@ -23,6 +23,9 @@ void GrGLSLGeometryProcessor::emitCode(EmitArgs& args) {
     if (gpArgs.fLocalCoordVar.getType() != kVoid_GrSLType) {
         this->collectTransforms(args.fVertBuilder, args.fVaryingHandler, args.fUniformHandler,
                                 gpArgs.fLocalCoordVar, args.fFPCoordTransformHandler);
+    } else {
+        // Make sure no FPs needed the local coord variable.
+        SkASSERT(!*args.fFPCoordTransformHandler);
     }
 
     if (args.fGP.willUseTessellationShaders()) {
@@ -36,7 +39,7 @@ void GrGLSLGeometryProcessor::emitCode(EmitArgs& args) {
         // Emit the vertex position to the hardware in the normalized window coordinates it expects.
         SkASSERT(kFloat2_GrSLType == gpArgs.fPositionVar.getType() ||
                  kFloat3_GrSLType == gpArgs.fPositionVar.getType());
-        vBuilder->emitNormalizedSkPosition(gpArgs.fPositionVar.c_str(), args.fRTAdjustName,
+        vBuilder->emitNormalizedSkPosition(gpArgs.fPositionVar.c_str(),
                                            gpArgs.fPositionVar.getType());
         if (kFloat2_GrSLType == gpArgs.fPositionVar.getType()) {
             args.fVaryingHandler->setNoPerspective();

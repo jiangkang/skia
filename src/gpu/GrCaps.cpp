@@ -50,14 +50,14 @@ GrCaps::GrCaps(const GrContextOptions& options) {
     fPerformColorClearsAsDraws = false;
     fAvoidLargeIndexBufferDraws = false;
     fPerformStencilClearsAsDraws = false;
-    fAllowCoverageCounting = false;
     fTransferFromBufferToTextureSupport = false;
     fTransferFromSurfaceToBufferSupport = false;
     fWritePixelsRowBytesSupport = false;
     fReadPixelsRowBytesSupport = false;
     fShouldCollapseSrcOverToSrcWhenAble = false;
-    fDriverDisableCCPR = false;
-    fDriverDisableMSAACCPR = false;
+    fMustSyncGpuDuringAbandon = true;
+    fDriverDisableMSAAClipAtlas = false;
+    fDisableTessellationPathRenderer = false;
 
     fBlendEquationSupport = kBasic_BlendEquationSupport;
     fAdvBlendEqDisableFlags = 0;
@@ -84,8 +84,6 @@ GrCaps::GrCaps(const GrContextOptions& options) {
     fNativeDrawIndexedIndirectIsBroken = false;
 
     fPreferVRAMUseOverFlushes = true;
-
-    fPreferTrianglesOverSampleMask = false;
 
     // Default to true, allow older versions of OpenGL to disable explicitly
     fClampToBorderSupport = true;
@@ -114,8 +112,8 @@ void GrCaps::applyOptionsOverrides(const GrContextOptions& options) {
     fShaderCaps->applyOptionsOverrides(options);
     this->onApplyOptionsOverrides(options);
     if (options.fDisableDriverCorrectnessWorkarounds) {
-        SkASSERT(!fDriverDisableCCPR);
-        SkASSERT(!fDriverDisableMSAACCPR);
+        SkASSERT(!fDriverDisableMSAAClipAtlas);
+        SkASSERT(!fDisableTessellationPathRenderer);
         SkASSERT(!fAvoidStencilBuffers);
         SkASSERT(!fAvoidWritePixelsFastPath);
         SkASSERT(!fRequiresManualFBBarrierAfterTessellatedStencilDraw);
@@ -134,15 +132,8 @@ void GrCaps::applyOptionsOverrides(const GrContextOptions& options) {
         fPerformStencilClearsAsDraws = true;
     }
 
-    fAllowCoverageCounting = !options.fDisableCoverageCountingPaths;
-
     fMaxTextureSize = std::min(fMaxTextureSize, options.fMaxTextureSizeOverride);
-    fMaxTileSize = fMaxTextureSize;
 #if GR_TEST_UTILS
-    // If the max tile override is zero, it means we should use the max texture size.
-    if (options.fMaxTileSizeOverride && options.fMaxTileSizeOverride < fMaxTextureSize) {
-        fMaxTileSize = options.fMaxTileSizeOverride;
-    }
     if (options.fSuppressDualSourceBlending) {
         // GrShaderCaps::applyOptionsOverrides already handled the rest; here we just need to make
         // sure mixed samples gets disabled if dual source blending is suppressed.
@@ -151,7 +142,13 @@ void GrCaps::applyOptionsOverrides(const GrContextOptions& options) {
     if (options.fClearAllTextures) {
         fShouldInitializeTextures = true;
     }
+    if (options.fDisallowWritePixelRowBytes) {
+        fWritePixelsRowBytesSupport = false;
+    }
 #endif
+    if (options.fSuppressMipmapSupport) {
+        fMipmapSupport = false;
+    }
 
     if (fMaxWindowRectangles > GrWindowRectangles::kMaxWindows) {
         SkDebugf("WARNING: capping window rectangles at %i. HW advertises support for %i.\n",
@@ -233,21 +230,19 @@ void GrCaps::dumpJSON(SkJSONWriter* writer) const {
     writer->appendBool("Use draws for color clears", fPerformColorClearsAsDraws);
     writer->appendBool("Avoid Large IndexBuffer Draws", fAvoidLargeIndexBufferDraws);
     writer->appendBool("Use draws for stencil clip clears", fPerformStencilClearsAsDraws);
-    writer->appendBool("Allow coverage counting shortcuts", fAllowCoverageCounting);
     writer->appendBool("Supports transfers from buffers to textures",
                        fTransferFromBufferToTextureSupport);
     writer->appendBool("Supports transfers from textures to buffers",
                        fTransferFromSurfaceToBufferSupport);
     writer->appendBool("Write pixels row bytes support", fWritePixelsRowBytesSupport);
     writer->appendBool("Read pixels row bytes support", fReadPixelsRowBytesSupport);
-    writer->appendBool("Disable CCPR on current driver [workaround]", fDriverDisableCCPR);
-    writer->appendBool("Disable MSAA version of CCPR on current driver [workaround]",
-                       fDriverDisableMSAACCPR);
+    writer->appendBool("Disable msaa clip mask atlas on current driver [workaround]",
+                       fDriverDisableMSAAClipAtlas);
+    writer->appendBool("Disable GrTessellationPathRenderer current driver [workaround]",
+                       fDisableTessellationPathRenderer);
     writer->appendBool("Clamp-to-border", fClampToBorderSupport);
 
     writer->appendBool("Prefer VRAM Use over flushes [workaround]", fPreferVRAMUseOverFlushes);
-    writer->appendBool("Prefer more triangles over sample mask [MSAA only]",
-                       fPreferTrianglesOverSampleMask);
     writer->appendBool("Avoid stencil buffers [workaround]", fAvoidStencilBuffers);
     writer->appendBool("Avoid writePixels fast path [workaround]", fAvoidWritePixelsFastPath);
     writer->appendBool("Requires manual FB barrier after tessellated stencilDraw [workaround]",
@@ -381,6 +376,11 @@ GrCaps::SupportedRead GrCaps::supportedReadPixelsColorType(GrColorType srcColorT
 
 GrBackendFormat GrCaps::getDefaultBackendFormat(GrColorType colorType,
                                                 GrRenderable renderable) const {
+    // Unknown color types are always an invalid format, so early out before calling virtual.
+    if (colorType == GrColorType::kUnknown) {
+        return {};
+    }
+
     auto format = this->onGetDefaultBackendFormat(colorType);
     if (!this->isFormatTexturable(format)) {
         return {};
@@ -442,4 +442,3 @@ GrDstSampleType GrCaps::getDstSampleTypeForProxy(const GrRenderTargetProxy* rt) 
     }
     return GrDstSampleType::kAsTextureCopy;
 }
-

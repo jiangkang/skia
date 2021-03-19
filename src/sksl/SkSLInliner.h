@@ -11,17 +11,23 @@
 #include <memory>
 #include <unordered_map>
 
+#include "src/sksl/SkSLMangler.h"
 #include "src/sksl/ir/SkSLProgram.h"
+#include "src/sksl/ir/SkSLVariableReference.h"
 
 namespace SkSL {
 
-struct Block;
+class Block;
 class Context;
-struct Expression;
-struct FunctionCall;
-struct Statement;
+class Expression;
+class FunctionCall;
+class FunctionDefinition;
+struct InlineCandidate;
+struct InlineCandidateList;
+class ModifiersPool;
+class Statement;
 class SymbolTable;
-struct Variable;
+class Variable;
 
 /**
  * Converts a FunctionCall in the IR to a set of statements to be injected ahead of the function
@@ -31,9 +37,50 @@ struct Variable;
  */
 class Inliner {
 public:
-    Inliner() {}
+    Inliner(const Context* context) : fContext(context) {}
 
-    void reset(const Context&, const Program::Settings&);
+    void reset(ModifiersPool* modifiers);
+
+    /** Inlines any eligible functions that are found. Returns true if any changes are made. */
+    bool analyze(const std::vector<std::unique_ptr<ProgramElement>>& elements,
+                 std::shared_ptr<SymbolTable> symbols,
+                 ProgramUsage* usage);
+
+private:
+    using VariableRewriteMap = std::unordered_map<const Variable*, std::unique_ptr<Expression>>;
+
+    enum class ReturnComplexity {
+        kSingleSafeReturn,
+        kScopedReturns,
+        kEarlyReturns,
+    };
+
+    const Program::Settings& settings() const { return fContext->fConfig->fSettings; }
+
+    void buildCandidateList(const std::vector<std::unique_ptr<ProgramElement>>& elements,
+                            std::shared_ptr<SymbolTable> symbols, ProgramUsage* usage,
+                            InlineCandidateList* candidateList);
+
+    std::unique_ptr<Expression> inlineExpression(int offset,
+                                                 VariableRewriteMap* varMap,
+                                                 SymbolTable* symbolTableForExpression,
+                                                 const Expression& expression);
+    std::unique_ptr<Statement> inlineStatement(int offset,
+                                               VariableRewriteMap* varMap,
+                                               SymbolTable* symbolTableForStatement,
+                                               std::unique_ptr<Expression>* resultExpr,
+                                               ReturnComplexity returnComplexity,
+                                               const Statement& statement,
+                                               bool isBuiltinCode);
+
+    /** Determines if a given function has multiple and/or early returns. */
+    static ReturnComplexity GetReturnComplexity(const FunctionDefinition& funcDef);
+
+    using InlinabilityCache = std::unordered_map<const FunctionDeclaration*, bool>;
+    bool candidateCanBeInlined(const InlineCandidate& candidate, InlinabilityCache* cache);
+
+    using FunctionSizeCache = std::unordered_map<const FunctionDeclaration*, int>;
+    int getFunctionSize(const FunctionDeclaration& fnDecl, FunctionSizeCache* cache);
 
     /**
      * Processes the passed-in FunctionCall expression. The FunctionCall expression should be
@@ -44,35 +91,33 @@ public:
         std::unique_ptr<Block> fInlinedBody;
         std::unique_ptr<Expression> fReplacementExpr;
     };
-    InlinedCall inlineCall(FunctionCall*, SymbolTable*);
+    InlinedCall inlineCall(FunctionCall*,
+                           std::shared_ptr<SymbolTable>,
+                           const ProgramUsage&,
+                           const FunctionDeclaration* caller);
+
+    /** Creates a scratch variable for the inliner to use. */
+    struct InlineVariable {
+        const Variable*             fVarSymbol;
+        std::unique_ptr<Statement>  fVarDecl;
+    };
+    InlineVariable makeInlineVariable(const String& baseName,
+                                      const Type* type,
+                                      SymbolTable* symbolTable,
+                                      Modifiers modifiers,
+                                      bool isBuiltinCode,
+                                      std::unique_ptr<Expression>* initialValue);
 
     /** Adds a scope to inlined bodies returned by `inlineCall`, if one is required. */
     void ensureScopedBlocks(Statement* inlinedBody, Statement* parentStmt);
 
-    /** Checks whether inlining is viable for a FunctionCall. */
-    bool isSafeToInline(const FunctionCall&, int inlineThreshold);
-
-    /** Inlines any eligible functions that are found. Returns true if any changes are made. */
-    bool analyze(Program& program);
-
-private:
-    using VariableRewriteMap = std::unordered_map<const Variable*, const Variable*>;
-
-    String uniqueNameForInlineVar(const String& baseName, SymbolTable* symbolTable);
-
-    std::unique_ptr<Expression> inlineExpression(int offset,
-                                                 VariableRewriteMap* varMap,
-                                                 const Expression& expression);
-    std::unique_ptr<Statement> inlineStatement(int offset,
-                                               VariableRewriteMap* varMap,
-                                               SymbolTable* symbolTableForStatement,
-                                               const Variable* returnVar,
-                                               bool haveEarlyReturns,
-                                               const Statement& statement);
+    /** Checks whether inlining is viable for a FunctionCall, modulo recursion and function size. */
+    bool isSafeToInline(const FunctionDefinition* functionDef);
 
     const Context* fContext = nullptr;
-    const Program::Settings* fSettings = nullptr;
-    int fInlineVarCounter = 0;
+    ModifiersPool* fModifiers = nullptr;
+    Mangler fMangler;
+    int fInlinedStatementCounter = 0;
 };
 
 }  // namespace SkSL

@@ -51,8 +51,8 @@ private:
     std::vector<float>  fAdvances;
     SkFontMetrics       fMetrics;
 
-    SkScalerContext* onCreateScalerContext(const SkScalerContextEffects&,
-                                           const SkDescriptor* desc) const override;
+    std::unique_ptr<SkScalerContext> onCreateScalerContext(const SkScalerContextEffects&,
+                                                           const SkDescriptor* desc) const override;
     void onFilterRec(SkScalerContextRec* rec) const override;
     void getGlyphToUnicodeMap(SkUnichar* glyphToUnicode) const override;
     std::unique_ptr<SkAdvancedTypefaceMetrics> onGetAdvancedMetrics() const override;
@@ -62,6 +62,7 @@ private:
     void onCharsToGlyphs(const SkUnichar* chars, int count, SkGlyphID glyphs[]) const override;
 
     void onGetFamilyName(SkString* familyName) const override;
+    bool onGetPostScriptName(SkString*) const override;
     SkTypeface::LocalizedStrings* onCreateFamilyNameIterator() const override;
 
     std::unique_ptr<SkStreamAsset> onOpenStream(int*) const override;
@@ -173,6 +174,10 @@ void SkUserTypeface::onGetFamilyName(SkString* familyName) const {
     *familyName = "";
 }
 
+bool SkUserTypeface::onGetPostScriptName(SkString*) const {
+    return false;
+}
+
 SkTypeface::LocalizedStrings* SkUserTypeface::onCreateFamilyNameIterator() const {
     return nullptr;
 }
@@ -196,10 +201,6 @@ public:
     }
 
 protected:
-    unsigned generateGlyphCount() override {
-        return this->userTF()->glyphCount();
-    }
-
     bool generateAdvance(SkGlyph* glyph) override {
         const SkUserTypeface* tf = this->userTF();
         auto advance = fMatrix.mapXY(tf->fAdvances[glyph->getGlyphID()], 0);
@@ -212,7 +213,7 @@ protected:
     void generateMetrics(SkGlyph* glyph) override {
         glyph->zeroMetrics();
         this->generateAdvance(glyph);
-        // Always generates from paths, so SkScalerContext::getMetrics will figure the bounds.
+        // Always generates from paths, so SkScalerContext::makeGlyph will figure the bounds.
     }
 
     void generateImage(const SkGlyph&) override { SK_ABORT("Should have generated from path."); }
@@ -231,9 +232,11 @@ private:
     SkMatrix fMatrix;
 };
 
-SkScalerContext* SkUserTypeface::onCreateScalerContext(const SkScalerContextEffects& effects,
-                                                       const SkDescriptor*           desc) const {
-    return new SkUserScalerContext(sk_ref_sp(const_cast<SkUserTypeface*>(this)), effects, desc);
+std::unique_ptr<SkScalerContext> SkUserTypeface::onCreateScalerContext(
+    const SkScalerContextEffects& effects, const SkDescriptor* desc) const
+{
+    return std::make_unique<SkUserScalerContext>(
+            sk_ref_sp(const_cast<SkUserTypeface*>(this)), effects, desc);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////

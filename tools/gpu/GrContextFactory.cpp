@@ -7,7 +7,7 @@
  */
 
 #include "include/gpu/GrDirectContext.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "tools/gpu/GrContextFactory.h"
 #ifdef SK_GL
 #include "tools/gpu/gl/GLTestContext.h"
@@ -315,6 +315,10 @@ ContextInfo GrContextFactory::getContextInfoInternal(ContextType type, ContextOv
     }
     if (!grCtx) {
         return ContextInfo();
+    }
+
+    if (shareContext) {
+        SkASSERT(grCtx->directContextID() != shareContext->directContextID());
     }
 
     // We must always add new contexts by pushing to the back so that when we delete them we delete

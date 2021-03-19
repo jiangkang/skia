@@ -22,7 +22,7 @@
 #include "src/gpu/GrBuffer.h"
 #include "src/gpu/GrCaps.h"
 #include "src/gpu/GrColorSpaceXform.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrGeometryProcessor.h"
 #include "src/gpu/GrMemoryPool.h"
 #include "src/gpu/GrOpFlushState.h"
@@ -33,11 +33,10 @@
 #include "src/gpu/GrProcessor.h"
 #include "src/gpu/GrProcessorSet.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
-#include "src/gpu/GrRenderTargetContextPriv.h"
 #include "src/gpu/GrSamplerState.h"
 #include "src/gpu/GrShaderCaps.h"
 #include "src/gpu/GrShaderVar.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/GrSurfaceProxy.h"
 #include "src/gpu/GrTextureProxy.h"
 #include "src/gpu/GrUserStencilSettings.h"
@@ -84,7 +83,7 @@ private:
     }
 
     SkISize onISize() override { return SkISize::Make(200, 200); }
-    DrawResult onDraw(GrRecordingContext*, GrRenderTargetContext*,
+    DrawResult onDraw(GrRecordingContext*, GrSurfaceDrawContext*,
                       SkCanvas*, SkString* errorMsg) override;
 
     const GradType fGradType;
@@ -97,7 +96,9 @@ private:
 class SampleLocationsTestProcessor : public GrGeometryProcessor {
 public:
     static GrGeometryProcessor* Make(SkArenaAlloc* arena, GradType gradType) {
-        return arena->make<SampleLocationsTestProcessor>(gradType);
+        return arena->make([&](void* ptr) {
+            return new (ptr) SampleLocationsTestProcessor(gradType);
+        });
     }
 
     const char* name() const override { return "SampleLocationsTestProcessor"; }
@@ -109,8 +110,6 @@ public:
     GrGLSLPrimitiveProcessor* createGLSLInstance(const GrShaderCaps&) const final;
 
 private:
-    friend class ::SkArenaAlloc; // for access to ctor
-
     SampleLocationsTestProcessor(GradType gradType)
             : GrGeometryProcessor(kSampleLocationsTestProcessor_ClassID)
             , fGradType(gradType) {
@@ -154,10 +153,10 @@ class SampleLocationsTestProcessor::Impl : public GrGLSLGeometryProcessor {
         // outset value to get too small.
         v->codeAppendf("float outset = 1/32.0;");
         v->codeAppendf("outset = (0 == (x + y) %% 2) ? -outset : +outset;");
-        v->codeAppendf("float l = ileft/16.0 - outset;");
-        v->codeAppendf("float r = iright/16.0 + outset;");
-        v->codeAppendf("float t = itop/16.0 - outset;");
-        v->codeAppendf("float b = ibot/16.0 + outset;");
+        v->codeAppendf("float l = float(ileft)/16.0 - outset;");
+        v->codeAppendf("float r = float(iright)/16.0 + outset;");
+        v->codeAppendf("float t = float(itop)/16.0 - outset;");
+        v->codeAppendf("float b = float(ibot)/16.0 + outset;");
 
         v->codeAppendf("float2 vertexpos;");
         v->codeAppendf("vertexpos.x = float(x) + ((0 == (sk_VertexID %% 2)) ? l : r);");
@@ -171,8 +170,8 @@ class SampleLocationsTestProcessor::Impl : public GrGLSLGeometryProcessor {
         }
 
         // Fragment shader: Output RED.
-        f->codeAppendf("%s = half4(1,0,0,1);", args.fOutputColor);
-        f->codeAppendf("%s = half4(1);", args.fOutputCoverage);
+        f->codeAppendf("const half4 %s = half4(1,0,0,1);", args.fOutputColor);
+        f->codeAppendf("const half4 %s = half4(1);", args.fOutputCoverage);
 
         // Now turn off all the samples inside our sub-rectangle. As long as the shaderBuilder's
         // sample offsets and sample mask are correlated with actual HW sample locations, no red
@@ -219,10 +218,9 @@ class SampleLocationsTestOp : public GrDrawOp {
 public:
     DEFINE_OP_CLASS_ID
 
-    static std::unique_ptr<GrDrawOp> Make(
+    static GrOp::Owner Make(
             GrRecordingContext* ctx, const SkMatrix& viewMatrix, GradType gradType) {
-        GrOpMemoryPool* pool = ctx->priv().opMemoryPool();
-        return pool->allocate<SampleLocationsTestOp>(gradType);
+        return GrOp::Make<SampleLocationsTestOp>(ctx, gradType);
     }
 
 private:
@@ -242,10 +240,11 @@ private:
 
     GrProgramInfo* createProgramInfo(const GrCaps* caps,
                                      SkArenaAlloc* arena,
-                                     const GrSurfaceProxyView* writeView,
+                                     const GrSurfaceProxyView& writeView,
                                      GrAppliedClip&& appliedClip,
                                      const GrXferProcessor::DstProxyView& dstProxyView,
-                                     GrXferBarrierFlags renderPassXferBarriers) const {
+                                     GrXferBarrierFlags renderPassXferBarriers,
+                                     GrLoadOp colorLoadOp) const {
         GrGeometryProcessor* geomProc = SampleLocationsTestProcessor::Make(arena, fGradType);
 
         GrPipeline::InputFlags flags = GrPipeline::InputFlags::kHWAntialias;
@@ -254,7 +253,7 @@ private:
                                               std::move(appliedClip), dstProxyView,
                                               geomProc, SkBlendMode::kSrcOver,
                                               GrPrimitiveType::kTriangleStrip,
-                                              renderPassXferBarriers,
+                                              renderPassXferBarriers, colorLoadOp,
                                               flags, &gStencilWrite);
     }
 
@@ -264,14 +263,16 @@ private:
                                        flushState->writeView(),
                                        flushState->detachAppliedClip(),
                                        flushState->dstProxyView(),
-                                       flushState->renderPassBarriers());
+                                       flushState->renderPassBarriers(),
+                                       flushState->colorLoadOp());
     }
 
     void onPrePrepare(GrRecordingContext* context,
-                      const GrSurfaceProxyView* writeView,
+                      const GrSurfaceProxyView& writeView,
                       GrAppliedClip* clip,
                       const GrXferProcessor::DstProxyView& dstProxyView,
-                      GrXferBarrierFlags renderPassXferBarriers) final {
+                      GrXferBarrierFlags renderPassXferBarriers,
+                      GrLoadOp colorLoadOp) final {
         // We're going to create the GrProgramInfo (and the GrPipeline and geometry processor
         // it relies on) in the DDL-record-time arena.
         SkArenaAlloc* arena = context->priv().recordTimeAllocator();
@@ -281,7 +282,7 @@ private:
 
         fProgramInfo = this->createProgramInfo(context->priv().caps(), arena, writeView,
                                                std::move(appliedClip), dstProxyView,
-                                               renderPassXferBarriers);
+                                               renderPassXferBarriers, colorLoadOp);
 
         context->priv().recordProgramInfo(fProgramInfo);
     }
@@ -307,7 +308,7 @@ private:
     // guaranteed to have the same lifetime as the program info.
     GrProgramInfo*  fProgramInfo = nullptr;
 
-    friend class ::GrOpMemoryPool; // for ctor
+    friend class ::GrOp; // for ctor
 
     using INHERITED = GrDrawOp;
 };
@@ -315,7 +316,7 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Test.
 
-DrawResult SampleLocationsGM::onDraw(GrRecordingContext* ctx, GrRenderTargetContext* rtc,
+DrawResult SampleLocationsGM::onDraw(GrRecordingContext* ctx, GrSurfaceDrawContext* rtc,
                                      SkCanvas* canvas, SkString* errorMsg) {
     if (!ctx->priv().caps()->sampleLocationsSupport()) {
         *errorMsg = "Requires support for sample locations.";
@@ -334,7 +335,7 @@ DrawResult SampleLocationsGM::onDraw(GrRecordingContext* ctx, GrRenderTargetCont
         return DrawResult::kSkip;
     }
 
-    auto offscreenRTC = GrRenderTargetContext::Make(
+    auto offscreenRTC = GrSurfaceDrawContext::Make(
             ctx, rtc->colorInfo().colorType(), nullptr, SkBackingFit::kExact, {200, 200},
             rtc->numSamples(), GrMipmapped::kNo, GrProtected::kNo, fOrigin);
     if (!offscreenRTC) {
@@ -357,18 +358,17 @@ DrawResult SampleLocationsGM::onDraw(GrRecordingContext* ctx, GrRenderTargetCont
             0xffff>()
     );
 
-    offscreenRTC->clear({0,1,0,1});
+    offscreenRTC->clear(SkPMColor4f{0, 1, 0, 1});
 
     // Stencil.
-    offscreenRTC->priv().testingOnly_addDrawOp(
-            SampleLocationsTestOp::Make(ctx, canvas->getTotalMatrix(), fGradType));
+    offscreenRTC->addDrawOp(SampleLocationsTestOp::Make(ctx, canvas->getTotalMatrix(), fGradType));
 
     // Cover.
     GrPaint coverPaint;
     coverPaint.setColor4f({1,0,0,1});
     coverPaint.setXPFactory(GrPorterDuffXPFactory::Get(SkBlendMode::kSrcOver));
-    rtc->priv().stencilRect(nullptr, &kStencilCover, std::move(coverPaint), GrAA::kNo,
-                            SkMatrix::I(), SkRect::MakeWH(200, 200));
+    rtc->stencilRect(nullptr, &kStencilCover, std::move(coverPaint), GrAA::kNo, SkMatrix::I(),
+                     SkRect::MakeWH(200, 200));
 
     // Copy offscreen texture to canvas.
     rtc->drawTexture(nullptr,

@@ -177,7 +177,7 @@ static void normalize_src_quad(const NormalizationParams& params,
 // Count the number of proxy runs in the entry set. This usually is already computed by
 // SkGpuDevice, but when the BatchLengthLimiter chops the set up it must determine a new proxy count
 // for each split.
-static int proxy_run_count(const GrRenderTargetContext::TextureSetEntry set[], int count) {
+static int proxy_run_count(const GrSurfaceDrawContext::TextureSetEntry set[], int count) {
     int actualProxyRunCount = 0;
     const GrSurfaceProxy* lastProxy = nullptr;
     for (int i = 0; i < count; ++i) {
@@ -221,41 +221,38 @@ static bool safe_to_ignore_subset_rect(GrAAType aaType, GrSamplerState::Filter f
  */
 class TextureOp final : public GrMeshDrawOp {
 public:
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          GrSurfaceProxyView proxyView,
-                                          sk_sp<GrColorSpaceXform> textureXform,
-                                          GrSamplerState::Filter filter,
-                                          GrSamplerState::MipmapMode mm,
-                                          const SkPMColor4f& color,
-                                          GrTextureOp::Saturate saturate,
-                                          GrAAType aaType,
-                                          DrawQuad* quad,
-                                          const SkRect* subset) {
-        GrOpMemoryPool* pool = context->priv().opMemoryPool();
-        return pool->allocate<TextureOp>(std::move(proxyView), std::move(textureXform), filter, mm,
-                                         color, saturate, aaType, quad, subset);
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            GrSurfaceProxyView proxyView,
+                            sk_sp<GrColorSpaceXform> textureXform,
+                            GrSamplerState::Filter filter,
+                            GrSamplerState::MipmapMode mm,
+                            const SkPMColor4f& color,
+                            GrTextureOp::Saturate saturate,
+                            GrAAType aaType,
+                            DrawQuad* quad,
+                            const SkRect* subset) {
+
+        return GrOp::Make<TextureOp>(context, std::move(proxyView), std::move(textureXform),
+                                     filter, mm, color, saturate, aaType, quad, subset);
     }
 
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          GrRenderTargetContext::TextureSetEntry set[],
-                                          int cnt,
-                                          int proxyRunCnt,
-                                          GrSamplerState::Filter filter,
-                                          GrSamplerState::MipmapMode mm,
-                                          GrTextureOp::Saturate saturate,
-                                          GrAAType aaType,
-                                          SkCanvas::SrcRectConstraint constraint,
-                                          const SkMatrix& viewMatrix,
-                                          sk_sp<GrColorSpaceXform> textureColorSpaceXform) {
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            GrSurfaceDrawContext::TextureSetEntry set[],
+                            int cnt,
+                            int proxyRunCnt,
+                            GrSamplerState::Filter filter,
+                            GrSamplerState::MipmapMode mm,
+                            GrTextureOp::Saturate saturate,
+                            GrAAType aaType,
+                            SkCanvas::SrcRectConstraint constraint,
+                            const SkMatrix& viewMatrix,
+                            sk_sp<GrColorSpaceXform> textureColorSpaceXform) {
         // Allocate size based on proxyRunCnt, since that determines number of ViewCountPairs.
         SkASSERT(proxyRunCnt <= cnt);
-
-        size_t size = sizeof(TextureOp) + sizeof(ViewCountPair) * (proxyRunCnt - 1);
-        GrOpMemoryPool* pool = context->priv().opMemoryPool();
-        void* mem = pool->allocate(size);
-        return std::unique_ptr<GrDrawOp>(
-                new (mem) TextureOp(set, cnt, proxyRunCnt, filter, mm, saturate, aaType, constraint,
-                                    viewMatrix, std::move(textureColorSpaceXform)));
+        return GrOp::MakeWithExtraMemory<TextureOp>(
+                context, sizeof(ViewCountPair) * (proxyRunCnt - 1),
+                set, cnt, proxyRunCnt, filter, mm, saturate, aaType, constraint,
+                viewMatrix, std::move(textureColorSpaceXform));
     }
 
     ~TextureOp() override {
@@ -310,7 +307,7 @@ public:
     DEFINE_OP_CLASS_ID
 
 private:
-    friend class ::GrOpMemoryPool;
+    friend class ::GrOp;
 
     struct ColorSubsetAndAA {
         ColorSubsetAndAA(const SkPMColor4f& color, const SkRect& subsetRect, GrQuadAAFlags aaFlags)
@@ -476,7 +473,7 @@ private:
         fViewCountPairs[0] = {proxyView.detachProxy(), quadCount};
     }
 
-    TextureOp(GrRenderTargetContext::TextureSetEntry set[],
+    TextureOp(GrSurfaceDrawContext::TextureSetEntry set[],
               int cnt,
               int proxyRunCnt,
               GrSamplerState::Filter filter,
@@ -625,8 +622,9 @@ private:
         DrawQuad extra;
         // Only clip when there's anti-aliasing. When non-aa, the GPU clips just fine and there's
         // no inset/outset math that requires w > 0.
-        int quadCount = quad->fEdgeFlags != GrQuadAAFlags::kNone ?
-                GrQuadUtils::ClipToW0(quad, &extra) : 1;
+        int quadCount = quad->fEdgeFlags != GrQuadAAFlags::kNone
+                                    ? GrQuadUtils::ClipToW0(quad, &extra)
+                                    : 1;
         if (quadCount == 0) {
             // We can't discard the op at this point, but disable AA flags so it won't go through
             // inset/outset processing
@@ -649,10 +647,11 @@ private:
 
     void onCreateProgramInfo(const GrCaps* caps,
                              SkArenaAlloc* arena,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              GrAppliedClip&& appliedClip,
                              const GrXferProcessor::DstProxyView& dstProxyView,
-                             GrXferBarrierFlags renderPassXferBarriers) override {
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp) override {
         SkASSERT(fDesc);
 
         GrGeometryProcessor* gp;
@@ -677,14 +676,15 @@ private:
         fDesc->fProgramInfo = GrSimpleMeshDrawOpHelper::CreateProgramInfo(
                 caps, arena, writeView, std::move(appliedClip), dstProxyView, gp,
                 GrProcessorSet::MakeEmptySet(), fDesc->fVertexSpec.primitiveType(),
-                renderPassXferBarriers, pipelineFlags);
+                renderPassXferBarriers, colorLoadOp, pipelineFlags);
     }
 
     void onPrePrepareDraws(GrRecordingContext* context,
-                           const GrSurfaceProxyView* writeView,
+                           const GrSurfaceProxyView& writeView,
                            GrAppliedClip* clip,
                            const GrXferProcessor::DstProxyView& dstProxyView,
-                           GrXferBarrierFlags renderPassXferBarriers) override {
+                           GrXferBarrierFlags renderPassXferBarriers,
+                           GrLoadOp colorLoadOp) override {
         TRACE_EVENT0("skia.gpu", TRACE_FUNC);
 
         SkDEBUGCODE(this->validate();)
@@ -699,7 +699,7 @@ private:
 
         // This will call onCreateProgramInfo and register the created program with the DDL.
         this->INHERITED::onPrePrepareDraws(context, writeView, clip, dstProxyView,
-                                           renderPassXferBarriers);
+                                           renderPassXferBarriers, colorLoadOp);
     }
 
     static void FillInVertices(const GrCaps& caps, TextureOp* texOp, Desc* desc, char* vertexData) {
@@ -961,8 +961,7 @@ private:
         }
     }
 
-    CombineResult onCombineIfPossible(GrOp* t, GrRecordingContext::Arenas*,
-                                      const GrCaps& caps) override {
+    CombineResult onCombineIfPossible(GrOp* t, SkArenaAlloc*, const GrCaps& caps) override {
         TRACE_EVENT0("skia.gpu", TRACE_FUNC);
         auto* that = t->cast<TextureOp>();
 
@@ -1063,12 +1062,12 @@ private:
         SkString str = SkStringPrintf("# draws: %d\n", fQuads.count());
         auto iter = fQuads.iterator();
         for (unsigned p = 0; p < fMetadata.fProxyCount; ++p) {
-            str.appendf("Proxy ID: %d, Filter: %d, MM: %d\n",
-                        fViewCountPairs[p].fProxy->uniqueID().asUInt(),
+            SkString proxyStr = fViewCountPairs[p].fProxy->dump();
+            str.append(proxyStr);
+            str.appendf(", Filter: %d, MM: %d\n",
                         static_cast<int>(fMetadata.fFilter),
                         static_cast<int>(fMetadata.fMipmapMode));
-            int i = 0;
-            while(i < fViewCountPairs[p].fQuadCnt && iter.next()) {
+            for (int i = 0; i < fViewCountPairs[p].fQuadCnt && iter.next(); ++i) {
                 const GrQuad* quad = iter.deviceQuad();
                 GrQuad uv = iter.isLocalValid() ? *(iter.localQuad()) : GrQuad();
                 const ColorSubsetAndAA& info = iter.metadata();
@@ -1082,8 +1081,6 @@ private:
                         quad->point(2).fX, quad->point(2).fY, quad->point(3).fX, quad->point(3).fY,
                         uv.point(0).fX, uv.point(0).fY, uv.point(1).fX, uv.point(1).fY,
                         uv.point(2).fX, uv.point(2).fY, uv.point(3).fX, uv.point(3).fY);
-
-                i++;
             }
         }
         return str;
@@ -1114,18 +1111,18 @@ uint32_t GrTextureOp::ClassID() {
 }
 #endif
 
-std::unique_ptr<GrDrawOp> GrTextureOp::Make(GrRecordingContext* context,
-                                            GrSurfaceProxyView proxyView,
-                                            SkAlphaType alphaType,
-                                            sk_sp<GrColorSpaceXform> textureXform,
-                                            GrSamplerState::Filter filter,
-                                            GrSamplerState::MipmapMode mm,
-                                            const SkPMColor4f& color,
-                                            Saturate saturate,
-                                            SkBlendMode blendMode,
-                                            GrAAType aaType,
-                                            DrawQuad* quad,
-                                            const SkRect* subset) {
+GrOp::Owner GrTextureOp::Make(GrRecordingContext* context,
+                              GrSurfaceProxyView proxyView,
+                              SkAlphaType alphaType,
+                              sk_sp<GrColorSpaceXform> textureXform,
+                              GrSamplerState::Filter filter,
+                              GrSamplerState::MipmapMode mm,
+                              const SkPMColor4f& color,
+                              Saturate saturate,
+                              SkBlendMode blendMode,
+                              GrAAType aaType,
+                              DrawQuad* quad,
+                              const SkRect* subset) {
     // Apply optimizations that are valid whether or not using GrTextureOp or GrFillRectOp
     if (subset && subset->contains(proxyView.proxy()->backingStoreBoundsRect())) {
         // No need for a shader-based subset if hardware clamping achieves the same effect
@@ -1147,23 +1144,25 @@ std::unique_ptr<GrDrawOp> GrTextureOp::Make(GrRecordingContext* context,
                                color, saturate, aaType, std::move(quad), subset);
     } else {
         // Emulate complex blending using GrFillRectOp
+        GrSamplerState samplerState(GrSamplerState::WrapMode::kClamp, filter, mm);
         GrPaint paint;
         paint.setColor4f(color);
         paint.setXPFactory(SkBlendMode_AsXPFactory(blendMode));
 
         std::unique_ptr<GrFragmentProcessor> fp;
+        const auto& caps = *context->priv().caps();
         if (subset) {
-            const auto& caps = *context->priv().caps();
             SkRect localRect;
             if (quad->fLocal.asRect(&localRect)) {
                 fp = GrTextureEffect::MakeSubset(std::move(proxyView), alphaType, SkMatrix::I(),
-                                                 filter, *subset, localRect, caps);
+                                                 samplerState, *subset, localRect, caps);
             } else {
                 fp = GrTextureEffect::MakeSubset(std::move(proxyView), alphaType, SkMatrix::I(),
-                                                 filter, *subset, caps);
+                                                 samplerState, *subset, caps);
             }
         } else {
-            fp = GrTextureEffect::Make(std::move(proxyView), alphaType, SkMatrix::I(), filter);
+            fp = GrTextureEffect::Make(std::move(proxyView), alphaType, SkMatrix::I(), samplerState,
+                                       caps);
         }
         fp = GrColorSpaceXformEffect::Make(std::move(fp), std::move(textureXform));
         fp = GrBlendFragmentProcessor::Make(std::move(fp), nullptr, SkBlendMode::kModulate);
@@ -1178,7 +1177,7 @@ std::unique_ptr<GrDrawOp> GrTextureOp::Make(GrRecordingContext* context,
 // A helper class that assists in breaking up bulk API quad draws into manageable chunks.
 class GrTextureOp::BatchSizeLimiter {
 public:
-    BatchSizeLimiter(GrRenderTargetContext* rtc,
+    BatchSizeLimiter(GrSurfaceDrawContext* rtc,
                      const GrClip* clip,
                      GrRecordingContext* context,
                      int numEntries,
@@ -1199,21 +1198,21 @@ public:
             , fTextureColorSpaceXform(textureColorSpaceXform)
             , fNumLeft(numEntries) {}
 
-    void createOp(GrRenderTargetContext::TextureSetEntry set[],
+    void createOp(GrSurfaceDrawContext::TextureSetEntry set[],
                   int clumpSize,
                   GrAAType aaType) {
         int clumpProxyCount = proxy_run_count(&set[fNumClumped], clumpSize);
-        std::unique_ptr<GrDrawOp> op = TextureOp::Make(fContext,
-                                                       &set[fNumClumped],
-                                                       clumpSize,
-                                                       clumpProxyCount,
-                                                       fFilter,
-                                                       fMipmapMode,
-                                                       fSaturate,
-                                                       aaType,
-                                                       fConstraint,
-                                                       fViewMatrix,
-                                                       fTextureColorSpaceXform);
+        GrOp::Owner op = TextureOp::Make(fContext,
+                                         &set[fNumClumped],
+                                         clumpSize,
+                                         clumpProxyCount,
+                                         fFilter,
+                                         fMipmapMode,
+                                         fSaturate,
+                                         aaType,
+                                         fConstraint,
+                                         fViewMatrix,
+                                         fTextureColorSpaceXform);
         fRTC->addDrawOp(fClip, std::move(op));
 
         fNumLeft -= clumpSize;
@@ -1224,7 +1223,7 @@ public:
     int baseIndex() const { return fNumClumped; }
 
 private:
-    GrRenderTargetContext*      fRTC;
+    GrSurfaceDrawContext*       fRTC;
     const GrClip*               fClip;
     GrRecordingContext*         fContext;
     GrSamplerState::Filter      fFilter;
@@ -1239,10 +1238,10 @@ private:
 };
 
 // Greedily clump quad draws together until the index buffer limit is exceeded.
-void GrTextureOp::AddTextureSetOps(GrRenderTargetContext* rtc,
+void GrTextureOp::AddTextureSetOps(GrSurfaceDrawContext* rtc,
                                    const GrClip* clip,
                                    GrRecordingContext* context,
-                                   GrRenderTargetContext::TextureSetEntry set[],
+                                   GrSurfaceDrawContext::TextureSetEntry set[],
                                    int cnt,
                                    int proxyRunCnt,
                                    GrSamplerState::Filter filter,

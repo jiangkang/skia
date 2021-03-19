@@ -6,14 +6,15 @@
  */
 
 #include "src/sksl/SkSLCPPUniformCTypes.h"
+
+#include "include/private/SkMutex.h"
 #include "src/sksl/SkSLHCodeGenerator.h"
 #include "src/sksl/SkSLStringStream.h"
 
 #include <map>
-#include <mutex>
 #include <vector>
 
-#if defined(SKSL_STANDALONE) || defined(GR_TEST_UTILS)
+#if defined(SKSL_STANDALONE) || GR_TEST_UTILS
 
 namespace SkSL {
 
@@ -145,8 +146,8 @@ UniformCTypeMapper::UniformCTypeMapper(
     , fSaveStateTemplate(saveStateFormat) {}
 
 const UniformCTypeMapper* UniformCTypeMapper::arrayMapper(int count) const {
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> guard(mutex);
+    static SkMutex& mutex = *(new SkMutex);
+    SkAutoMutexExclusive guard(mutex);
     using Key = std::pair<const UniformCTypeMapper*, int>;
     static std::map<Key, UniformCTypeMapper> registered;
     Key key(this, count);
@@ -253,7 +254,7 @@ static const std::vector<UniformCTypeMapper>& get_mappers() {
 // ctype and supports the sksl type of the variable.
 const UniformCTypeMapper* UniformCTypeMapper::Get(const Context& context, const Type& type,
                                                   const Layout& layout) {
-    if (type.typeKind() == Type::TypeKind::kArray) {
+    if (type.isArray()) {
         const UniformCTypeMapper* base = Get(context, type.componentType(), layout);
         return base ? base->arrayMapper(type.columns()) : nullptr;
     }
@@ -288,4 +289,4 @@ const UniformCTypeMapper* UniformCTypeMapper::Get(const Context& context, const 
 
 }  // namespace SkSL
 
-#endif // defined(SKSL_STANDALONE) || defined(GR_TEST_UTILS)
+#endif // defined(SKSL_STANDALONE) || GR_TEST_UTILS

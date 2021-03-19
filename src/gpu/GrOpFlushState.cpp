@@ -9,8 +9,8 @@
 
 #include "include/gpu/GrDirectContext.h"
 #include "src/core/SkConvertPixels.h"
-#include "src/gpu/GrContextPriv.h"
 #include "src/gpu/GrDataUtils.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrDrawOpAtlas.h"
 #include "src/gpu/GrGpu.h"
 #include "src/gpu/GrImageInfo.h"
@@ -34,8 +34,13 @@ const GrCaps& GrOpFlushState::caps() const {
     return *fGpu->caps();
 }
 
+GrThreadSafeCache* GrOpFlushState::threadSafeCache() const {
+    return fGpu->getContext()->priv().threadSafeCache();
+}
+
 void GrOpFlushState::executeDrawsAndUploadsForMeshDrawOp(
-        const GrOp* op, const SkRect& chainBounds, const GrPipeline* pipeline) {
+        const GrOp* op, const SkRect& chainBounds, const GrPipeline* pipeline,
+        const GrUserStencilSettings* userStencilSettings) {
     SkASSERT(this->opsRenderPass());
 
     while (fCurrDraw != fDraws.end() && fCurrDraw->fOp == op) {
@@ -46,15 +51,14 @@ void GrOpFlushState::executeDrawsAndUploadsForMeshDrawOp(
             ++fCurrUpload;
         }
 
-        GrProgramInfo programInfo(this->proxy()->numSamples(),
-                                  this->proxy()->numStencilSamples(),
-                                  this->proxy()->backendFormat(),
-                                  this->writeView()->origin(),
+        GrProgramInfo programInfo(this->writeView(),
                                   pipeline,
+                                  userStencilSettings,
                                   fCurrDraw->fGeometryProcessor,
                                   fCurrDraw->fPrimitiveType,
                                   0,
-                                  this->renderPassBarriers());
+                                  this->renderPassBarriers(),
+                                  this->colorLoadOp());
 
         this->bindPipelineAndScissorClip(programInfo, chainBounds);
         this->bindTextures(programInfo.primProc(), fCurrDraw->fPrimProcProxies,

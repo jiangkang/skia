@@ -19,6 +19,9 @@
 #include "src/gpu/glsl/GrGLSLUniformHandler.h"
 #include "src/gpu/glsl/GrGLSLVertexGeoBuilder.h"
 #include "src/gpu/glsl/GrGLSLXferProcessor.h"
+#include "src/sksl/SkSLCompiler.h"
+
+#include <vector>
 
 class GrProgramDesc;
 class GrShaderVar;
@@ -31,7 +34,7 @@ public:
     using UniformHandle      = GrGLSLUniformHandler::UniformHandle;
     using SamplerHandle      = GrGLSLUniformHandler::SamplerHandle;
 
-    virtual ~GrGLSLProgramBuilder() {}
+    virtual ~GrGLSLProgramBuilder();
 
     virtual const GrCaps* caps() const = 0;
     const GrShaderCaps* shaderCaps() const { return this->caps()->shaderCaps(); }
@@ -46,6 +49,7 @@ public:
         return fProgramInfo.pipeline().snapVerticesToPixelCenters();
     }
     bool hasPointSize() const { return fProgramInfo.primitiveType() == GrPrimitiveType::kPoints; }
+    virtual SkSL::Compiler* shaderCompiler() const = 0;
 
     // TODO: stop passing in the renderTarget for just the sampleLocations
     int effectiveSampleCnt() {
@@ -87,8 +91,9 @@ public:
 
     // Generates a name for a variable. The generated string will be name prefixed by the prefix
     // char (unless the prefix is '\0'). It also will mangle the name to be stage-specific unless
-    // explicitly asked not to.
-    void nameVariable(SkString* out, char prefix, const char* name, bool mangle = true);
+    // explicitly asked not to. `nameVariable` can also be used to generate names for functions or
+    // other types of symbols where unique names are important.
+    SkString nameVariable(char prefix, const char* name, bool mangle = true);
 
     virtual GrGLSLUniformHandler* uniformHandler() = 0;
     virtual const GrGLSLUniformHandler* uniformHandler() const = 0;
@@ -116,7 +121,7 @@ public:
 
     std::unique_ptr<GrGLSLPrimitiveProcessor> fGeometryProcessor;
     std::unique_ptr<GrGLSLXferProcessor> fXferProcessor;
-    std::unique_ptr<std::unique_ptr<GrGLSLFragmentProcessor>[]> fFragmentProcessors;
+    std::vector<std::unique_ptr<GrGLSLFragmentProcessor>> fFPImpls;
 
 protected:
     explicit GrGLSLProgramBuilder(GrRenderTarget*, const GrProgramDesc&, const GrProgramInfo&);

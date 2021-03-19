@@ -127,6 +127,14 @@ std::tuple<bool, ClusterIndex, ClusterIndex> Run::findLimitingClusters(TextRange
     return std::make_tuple(startIndex != fClusterRange.end && endIndex != fClusterRange.end, startIndex, endIndex);
 }
 
+// Adjust the text to grapheme edges so the first grapheme start is in the text and the last grapheme start is in the text
+// It actually means that the first grapheme is entirely in the text and the last grapheme does not have to be
+std::tuple<bool, TextIndex, TextIndex> Run::findLimitingGraphemes(TextRange text) const {
+    TextIndex start = fOwner->findNextGraphemeBoundary(text.start);
+    TextIndex end = fOwner->findNextGraphemeBoundary(text.end);
+    return std::make_tuple(true, start, end);
+}
+
 void Run::iterateThroughClustersInTextOrder(const ClusterTextVisitor& visitor) {
     // Can't figure out how to do it with one code for both cases without 100 ifs
     // Can't go through clusters because there are no cluster table yet
@@ -333,19 +341,21 @@ PlaceholderStyle* Run::placeholderStyle() const {
     }
 }
 
-Run* Cluster::run() const {
+Run* Cluster::runOrNull() const {
     if (fRunIndex >= fOwner->runs().size()) {
         return nullptr;
     }
     return &fOwner->run(fRunIndex);
 }
 
-SkFont Cluster::font() const {
-    return fOwner->run(fRunIndex).font();
+Run& Cluster::run() const {
+    SkASSERT(fRunIndex < fOwner->runs().size());
+    return fOwner->run(fRunIndex);
 }
 
-bool Cluster::isHardBreak() const {
-    return fOwner->codeUnitHasProperty(fTextRange.end, CodeUnitFlags::kHardLineBreakBefore);
+SkFont Cluster::font() const {
+    SkASSERT(fRunIndex < fOwner->runs().size());
+    return fOwner->run(fRunIndex).font();
 }
 
 bool Cluster::isSoftBreak() const {
@@ -375,6 +385,8 @@ Cluster::Cluster(ParagraphImpl* owner,
         , fHalfLetterSpacing(0.0) {
     size_t len = fOwner->getWhitespacesLength(fTextRange);
     fIsWhiteSpaces = (len == this->fTextRange.width());
+    fIsSpaces = fOwner->isSpace(fTextRange);
+    fIsHardBreak = fOwner->codeUnitHasProperty(fTextRange.end, CodeUnitFlags::kHardLineBreakBefore);
 }
 
 }  // namespace textlayout

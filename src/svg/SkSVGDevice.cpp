@@ -22,6 +22,7 @@
 #include "include/core/SkTypeface.h"
 #include "include/private/SkChecksum.h"
 #include "include/private/SkTHash.h"
+#include "include/private/SkTPin.h"
 #include "include/private/SkTo.h"
 #include "include/svg/SkSVGCanvas.h"
 #include "include/utils/SkBase64.h"
@@ -949,7 +950,8 @@ void SkSVGDevice::drawBitmapCommon(const MxCp& mc, const SkBitmap& bm, const SkP
 }
 
 void SkSVGDevice::drawImageRect(const SkImage* image, const SkRect* src, const SkRect& dst,
-                                const SkPaint& paint, SkCanvas::SrcRectConstraint constraint) {
+                                const SkSamplingOptions& sampling, const SkPaint& paint,
+                                SkCanvas::SrcRectConstraint constraint) {
     SkBitmap bm;
     // TODO: support gpu images
     if (!as_IB(image)->getROPixels(nullptr, &bm)) {
@@ -963,11 +965,8 @@ void SkSVGDevice::drawImageRect(const SkImage* image, const SkRect* src, const S
         cs->clipRect(dst, this->localToDevice(), kIntersect_SkClipOp, paint.isAntiAlias());
     }
 
-    SkMatrix adjustedMatrix;
-    adjustedMatrix.setRectToRect(src ? *src : SkRect::Make(bm.bounds()),
-                                 dst,
-                                 SkMatrix::kFill_ScaleToFit);
-    adjustedMatrix.postConcat(this->localToDevice());
+    SkMatrix adjustedMatrix = this->localToDevice()
+                            * SkMatrix::RectToRect(src ? *src : SkRect::Make(bm.bounds()), dst);
 
     drawBitmapCommon(MxCp(&adjustedMatrix, cs), bm, paint);
 }
@@ -1090,10 +1089,5 @@ void SkSVGDevice::drawGlyphRunList(const SkGlyphRunList& glyphRunList)  {
 }
 
 void SkSVGDevice::drawVertices(const SkVertices*, SkBlendMode, const SkPaint&) {
-    // todo
-}
-
-void SkSVGDevice::drawDevice(SkBaseDevice*, int x, int y,
-                             const SkPaint&) {
     // todo
 }

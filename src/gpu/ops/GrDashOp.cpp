@@ -222,16 +222,14 @@ public:
         SkScalar fPerpendicularScale;
     };
 
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          GrPaint&& paint,
-                                          const LineData& geometry,
-                                          SkPaint::Cap cap,
-                                          AAMode aaMode, bool fullDash,
-                                          const GrUserStencilSettings* stencilSettings) {
-        GrOpMemoryPool* pool = context->priv().opMemoryPool();
-
-        return pool->allocate<DashOp>(std::move(paint), geometry, cap,
-                                      aaMode, fullDash, stencilSettings);
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            GrPaint&& paint,
+                            const LineData& geometry,
+                            SkPaint::Cap cap,
+                            AAMode aaMode, bool fullDash,
+                            const GrUserStencilSettings* stencilSettings) {
+        return GrOp::Make<DashOp>(context, std::move(paint), geometry, cap,
+                                  aaMode, fullDash, stencilSettings);
     }
 
     const char* name() const override { return "DashOp"; }
@@ -267,7 +265,7 @@ public:
     }
 
 private:
-    friend class GrOpMemoryPool; // for ctor
+    friend class GrOp; // for ctor
 
     DashOp(GrPaint&& paint, const LineData& geometry, SkPaint::Cap cap, AAMode aaMode,
            bool fullDash, const GrUserStencilSettings* stencilSettings)
@@ -319,10 +317,11 @@ private:
 
     void onCreateProgramInfo(const GrCaps* caps,
                              SkArenaAlloc* arena,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              GrAppliedClip&& appliedClip,
                              const GrXferProcessor::DstProxyView& dstProxyView,
-                             GrXferBarrierFlags renderPassXferBarriers) override {
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp) override {
 
         DashCap capType = (this->cap() == SkPaint::kRound_Cap) ? kRound_DashCap : kNonRound_DashCap;
 
@@ -362,6 +361,7 @@ private:
                                                                    std::move(fProcessorSet),
                                                                    GrPrimitiveType::kTriangles,
                                                                    renderPassXferBarriers,
+                                                                   colorLoadOp,
                                                                    pipelineFlags,
                                                                    fStencilSettings);
     }
@@ -665,8 +665,7 @@ private:
         flushState->drawMesh(*fMesh);
     }
 
-    CombineResult onCombineIfPossible(GrOp* t, GrRecordingContext::Arenas*,
-                                      const GrCaps& caps) override {
+    CombineResult onCombineIfPossible(GrOp* t, SkArenaAlloc*, const GrCaps& caps) override {
         DashOp* that = t->cast<DashOp>();
         if (fProcessorSet != that->fProcessorSet) {
             return CombineResult::kCannotCombine;
@@ -740,13 +739,13 @@ private:
     using INHERITED = GrMeshDrawOp;
 };
 
-std::unique_ptr<GrDrawOp> GrDashOp::MakeDashLineOp(GrRecordingContext* context,
-                                                   GrPaint&& paint,
-                                                   const SkMatrix& viewMatrix,
-                                                   const SkPoint pts[2],
-                                                   AAMode aaMode,
-                                                   const GrStyle& style,
-                                                   const GrUserStencilSettings* stencilSettings) {
+GrOp::Owner GrDashOp::MakeDashLineOp(GrRecordingContext* context,
+                                     GrPaint&& paint,
+                                     const SkMatrix& viewMatrix,
+                                     const SkPoint pts[2],
+                                     AAMode aaMode,
+                                     const GrStyle& style,
+                                     const GrUserStencilSettings* stencilSettings) {
     SkASSERT(GrDashOp::CanDrawDashLine(pts, style, viewMatrix));
     const SkScalar* intervals = style.dashIntervals();
     SkScalar phase = style.dashPhase();
@@ -838,7 +837,6 @@ public:
 
 private:
     friend class GLDashingCircleEffect;
-    friend class ::SkArenaAlloc; // for access to ctor
 
     DashingCircleEffect(const SkPMColor4f&, AAMode aaMode, const SkMatrix& localMatrix,
                         bool usesLocalCoords);
@@ -914,6 +912,7 @@ void GLDashingCircleEffect::onEmitCode(EmitArgs& args, GrGPArgs* gpArgs) {
 
     GrGLSLFPFragmentBuilder* fragBuilder = args.fFragBuilder;
     // Setup pass through color
+    fragBuilder->codeAppendf("half4 %s;", args.fOutputColor);
     this->setupUniformColor(fragBuilder, uniformHandler, args.fOutputColor, &fColorUniform);
 
     // Setup position
@@ -939,7 +938,7 @@ void GLDashingCircleEffect::onEmitCode(EmitArgs& args, GrGPArgs* gpArgs) {
         fragBuilder->codeAppendf("half alpha = 1.0;");
         fragBuilder->codeAppendf("alpha *=  dist < %s.x + 0.5 ? 1.0 : 0.0;", circleParams.fsIn());
     }
-    fragBuilder->codeAppendf("%s = half4(alpha);", args.fOutputCoverage);
+    fragBuilder->codeAppendf("half4 %s = half4(alpha);", args.fOutputCoverage);
 }
 
 void GLDashingCircleEffect::setData(const GrGLSLProgramDataManager& pdman,
@@ -970,7 +969,9 @@ GrGeometryProcessor* DashingCircleEffect::Make(SkArenaAlloc* arena,
                                                AAMode aaMode,
                                                const SkMatrix& localMatrix,
                                                bool usesLocalCoords) {
-    return arena->make<DashingCircleEffect>(color, aaMode, localMatrix, usesLocalCoords);
+    return arena->make([&](void* ptr) {
+        return new (ptr) DashingCircleEffect(color, aaMode, localMatrix, usesLocalCoords);
+    });
 }
 
 void DashingCircleEffect::getGLSLProcessorKey(const GrShaderCaps& caps,
@@ -1048,7 +1049,6 @@ public:
 
 private:
     friend class GLDashingLineEffect;
-    friend class ::SkArenaAlloc; // for access to ctor
 
     DashingLineEffect(const SkPMColor4f&, AAMode aaMode, const SkMatrix& localMatrix,
                       bool usesLocalCoords);
@@ -1116,6 +1116,7 @@ void GLDashingLineEffect::onEmitCode(EmitArgs& args, GrGPArgs* gpArgs) {
 
     GrGLSLFPFragmentBuilder* fragBuilder = args.fFragBuilder;
     // Setup pass through color
+    fragBuilder->codeAppendf("half4 %s;", args.fOutputColor);
     this->setupUniformColor(fragBuilder, uniformHandler, args.fOutputColor, &fColorUniform);
 
     // Setup position
@@ -1165,7 +1166,7 @@ void GLDashingLineEffect::onEmitCode(EmitArgs& args, GrGPArgs* gpArgs) {
         fragBuilder->codeAppendf("alpha *= (%s.z - fragPosShifted.x) >= -0.5 ? 1.0 : 0.0;",
                                  inRectParams.fsIn());
     }
-    fragBuilder->codeAppendf("%s = half4(alpha);", args.fOutputCoverage);
+    fragBuilder->codeAppendf("half4 %s = half4(alpha);", args.fOutputCoverage);
 }
 
 void GLDashingLineEffect::setData(const GrGLSLProgramDataManager& pdman,
@@ -1196,7 +1197,9 @@ GrGeometryProcessor* DashingLineEffect::Make(SkArenaAlloc* arena,
                                              AAMode aaMode,
                                              const SkMatrix& localMatrix,
                                              bool usesLocalCoords) {
-    return arena->make<DashingLineEffect>(color, aaMode, localMatrix, usesLocalCoords);
+    return arena->make([&](void* ptr) {
+        return new (ptr) DashingLineEffect(color, aaMode, localMatrix, usesLocalCoords);
+    });
 }
 
 void DashingLineEffect::getGLSLProcessorKey(const GrShaderCaps& caps,

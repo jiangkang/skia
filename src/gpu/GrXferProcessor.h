@@ -116,7 +116,8 @@ public:
      */
     void getGLSLProcessorKey(const GrShaderCaps&,
                              GrProcessorKeyBuilder*,
-                             const GrSurfaceOrigin* originIfDstTexture) const;
+                             const GrSurfaceOrigin* originIfDstTexture,
+                             GrDstSampleType dstSampleType) const;
 
     /** Returns a new instance of the appropriate *GL* implementation class
         for the given GrXferProcessor; caller is responsible for deleting
@@ -289,6 +290,10 @@ public:
          * If set the draw will use fixed function non coherent advanced blends.
          */
         kUsesNonCoherentHWBlending = 0x40,
+        /**
+         * If set, the existing dst value has no effect on the final output.
+         */
+        kUnaffectedByDstValue = 0x80,
     };
     GR_DECL_BITFIELD_CLASS_OPS_FRIENDS(AnalysisProperties);
 
@@ -302,6 +307,7 @@ public:
     static AnalysisProperties GetAnalysisProperties(const GrXPFactory*,
                                                     const GrProcessorAnalysisColor&,
                                                     const GrProcessorAnalysisCoverage&,
+                                                    bool hasMixedSamples,
                                                     const GrCaps&,
                                                     GrClampType);
 
@@ -321,6 +327,7 @@ private:
      */
     virtual AnalysisProperties analysisProperties(const GrProcessorAnalysisColor&,
                                                   const GrProcessorAnalysisCoverage&,
+                                                  bool hasMixedSamples,
                                                   const GrCaps&,
                                                   GrClampType) const = 0;
 };

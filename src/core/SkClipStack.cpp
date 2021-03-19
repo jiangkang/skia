@@ -1052,7 +1052,7 @@ uint32_t SkClipStack::GetNextGenID() {
 
     uint32_t id;
     do {
-        id = nextID++;
+        id = nextID.fetch_add(1, std::memory_order_relaxed);
     } while (id < kFirstUnreservedGenID);
     return id;
 }
@@ -1118,7 +1118,7 @@ void SkClipStack::Element::dump() const {
             SkDebugf("\n");
             break;
         case DeviceSpaceType::kPath:
-            this->getDeviceSpacePath().dump(nullptr, true, false);
+            this->getDeviceSpacePath().dump(nullptr, false);
             break;
         case DeviceSpaceType::kShader:
             // SkShaders don't provide much introspection that's worth while.

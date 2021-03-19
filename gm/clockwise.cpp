@@ -23,7 +23,7 @@
 #include "src/gpu/GrBuffer.h"
 #include "src/gpu/GrCaps.h"
 #include "src/gpu/GrColorSpaceXform.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrGeometryProcessor.h"
 #include "src/gpu/GrGpuBuffer.h"
 #include "src/gpu/GrMemoryPool.h"
@@ -35,12 +35,11 @@
 #include "src/gpu/GrProcessorSet.h"
 #include "src/gpu/GrProgramInfo.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
-#include "src/gpu/GrRenderTargetContextPriv.h"
 #include "src/gpu/GrResourceProvider.h"
 #include "src/gpu/GrSamplerState.h"
 #include "src/gpu/GrShaderCaps.h"
 #include "src/gpu/GrShaderVar.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/GrSurfaceProxy.h"
 #include "src/gpu/GrTextureProxy.h"
 #include "src/gpu/glsl/GrGLSLFragmentShaderBuilder.h"
@@ -70,7 +69,7 @@ static constexpr GrGeometryProcessor::Attribute gVertex =
 class ClockwiseGM : public skiagm::GpuGM {
     SkString onShortName() override { return SkString("clockwise"); }
     SkISize onISize() override { return {300, 200}; }
-    void onDraw(GrRecordingContext*, GrRenderTargetContext*, SkCanvas*) override;
+    void onDraw(GrRecordingContext*, GrSurfaceDrawContext*, SkCanvas*) override;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -79,7 +78,9 @@ class ClockwiseGM : public skiagm::GpuGM {
 class ClockwiseTestProcessor : public GrGeometryProcessor {
 public:
     static GrGeometryProcessor* Make(SkArenaAlloc* arena, bool readSkFragCoord) {
-        return arena->make<ClockwiseTestProcessor>(readSkFragCoord);
+        return arena->make([&](void* ptr) {
+            return new (ptr) ClockwiseTestProcessor(readSkFragCoord);
+        });
     }
 
     const char* name() const final { return "ClockwiseTestProcessor"; }
@@ -93,8 +94,6 @@ public:
     bool readSkFragCoord() const { return fReadSkFragCoord; }
 
 private:
-    friend class ::SkArenaAlloc; // for access to ctor
-
     ClockwiseTestProcessor(bool readSkFragCoord)
             : GrGeometryProcessor(kClockwiseTestProcessor_ClassID)
             , fReadSkFragCoord(readSkFragCoord) {
@@ -114,12 +113,13 @@ class GLSLClockwiseTestProcessor : public GrGLSLGeometryProcessor {
         args.fVaryingHandler->emitAttributes(proc);
         gpArgs->fPositionVar.set(kFloat2_GrSLType, "position");
         args.fFragBuilder->codeAppendf(
-                "%s = sk_Clockwise ? half4(0,1,0,1) : half4(1,0,0,1);", args.fOutputColor);
+                "half4 %s = sk_Clockwise ? half4(0,1,0,1) : half4(1,0,0,1);",
+                args.fOutputColor);
         if (!proc.readSkFragCoord()) {
-            args.fFragBuilder->codeAppendf("%s = half4(1);", args.fOutputCoverage);
+            args.fFragBuilder->codeAppendf("const half4 %s = half4(1);", args.fOutputCoverage);
         } else {
             // Verify layout(origin_upper_left) on gl_FragCoord does not affect gl_FrontFacing.
-            args.fFragBuilder->codeAppendf("%s = half4(min(half(sk_FragCoord.y), 1));",
+            args.fFragBuilder->codeAppendf("half4 %s = half4(min(half(sk_FragCoord.y), 1));",
                                            args.fOutputCoverage);
         }
     }
@@ -137,10 +137,9 @@ class ClockwiseTestOp : public GrDrawOp {
 public:
     DEFINE_OP_CLASS_ID
 
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          bool readSkFragCoord, int y = 0) {
-        GrOpMemoryPool* pool = context->priv().opMemoryPool();
-        return pool->allocate<ClockwiseTestOp>(readSkFragCoord, y);
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            bool readSkFragCoord, int y = 0) {
+        return GrOp::Make<ClockwiseTestOp>(context, readSkFragCoord, y);
     }
 
 private:
@@ -160,17 +159,18 @@ private:
 
     GrProgramInfo* createProgramInfo(const GrCaps* caps,
                                      SkArenaAlloc* arena,
-                                     const GrSurfaceProxyView* writeView,
+                                     const GrSurfaceProxyView& writeView,
                                      GrAppliedClip&& appliedClip,
                                      const GrXferProcessor::DstProxyView& dstProxyView,
-                                     GrXferBarrierFlags renderPassXferBarriers) const {
+                                     GrXferBarrierFlags renderPassXferBarriers,
+                                     GrLoadOp colorLoadOp) const {
         GrGeometryProcessor* geomProc = ClockwiseTestProcessor::Make(arena, fReadSkFragCoord);
 
         return sk_gpu_test::CreateProgramInfo(caps, arena, writeView,
                                               std::move(appliedClip), dstProxyView,
                                               geomProc, SkBlendMode::kPlus,
                                               GrPrimitiveType::kTriangleStrip,
-                                              renderPassXferBarriers);
+                                              renderPassXferBarriers, colorLoadOp);
     }
 
     GrProgramInfo* createProgramInfo(GrOpFlushState* flushState) const {
@@ -179,14 +179,16 @@ private:
                                        flushState->writeView(),
                                        flushState->detachAppliedClip(),
                                        flushState->dstProxyView(),
-                                       flushState->renderPassBarriers());
+                                       flushState->renderPassBarriers(),
+                                       flushState->colorLoadOp());
     }
 
     void onPrePrepare(GrRecordingContext* context,
-                      const GrSurfaceProxyView* writeView,
+                      const GrSurfaceProxyView& writeView,
                       GrAppliedClip* clip,
                       const GrXferProcessor::DstProxyView& dstProxyView,
-                      GrXferBarrierFlags renderPassXferBarriers) final {
+                      GrXferBarrierFlags renderPassXferBarriers,
+                      GrLoadOp colorLoadOp) final {
         SkArenaAlloc* arena = context->priv().recordTimeAllocator();
 
         // This is equivalent to a GrOpFlushState::detachAppliedClip
@@ -194,7 +196,7 @@ private:
 
         fProgramInfo = this->createProgramInfo(context->priv().caps(), arena, writeView,
                                                std::move(appliedClip), dstProxyView,
-                                               renderPassXferBarriers);
+                                               renderPassXferBarriers, colorLoadOp);
 
         context->priv().recordProgramInfo(fProgramInfo);
     }
@@ -235,7 +237,7 @@ private:
     // guaranteed to have the same lifetime as the program info.
     GrProgramInfo*  fProgramInfo = nullptr;
 
-    friend class ::GrOpMemoryPool; // for ctor
+    friend class ::GrOp; // for ctor
 
     using INHERITED = GrDrawOp;
 };
@@ -243,22 +245,22 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Test.
 
-void ClockwiseGM::onDraw(GrRecordingContext* ctx, GrRenderTargetContext* rtc, SkCanvas* canvas) {
+void ClockwiseGM::onDraw(GrRecordingContext* ctx, GrSurfaceDrawContext* rtc, SkCanvas* canvas) {
     rtc->clear(SK_PMColor4fBLACK);
 
     // Draw the test directly to the frame buffer.
-    rtc->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
-    rtc->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
+    rtc->addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
+    rtc->addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
 
     // Draw the test to an off-screen, top-down render target.
     GrColorType rtcColorType = rtc->colorInfo().colorType();
-    if (auto topLeftRTC = GrRenderTargetContext::Make(
+    if (auto topLeftRTC = GrSurfaceDrawContext::Make(
                 ctx, rtcColorType, nullptr, SkBackingFit::kExact, {100, 200}, 1,
                 GrMipmapped::kNo, GrProtected::kNo, kTopLeft_GrSurfaceOrigin, SkBudgeted::kYes,
                 nullptr)) {
         topLeftRTC->clear(SK_PMColor4fTRANSPARENT);
-        topLeftRTC->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
-        topLeftRTC->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
+        topLeftRTC->addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
+        topLeftRTC->addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
         rtc->drawTexture(nullptr,
                          topLeftRTC->readSurfaceView(),
                          rtc->colorInfo().alphaType(),
@@ -276,13 +278,13 @@ void ClockwiseGM::onDraw(GrRecordingContext* ctx, GrRenderTargetContext* rtc, Sk
     }
 
     // Draw the test to an off-screen, bottom-up render target.
-    if (auto topLeftRTC = GrRenderTargetContext::Make(
+    if (auto topLeftRTC = GrSurfaceDrawContext::Make(
                 ctx, rtcColorType, nullptr, SkBackingFit::kExact, {100, 200}, 1,
                 GrMipmapped::kNo, GrProtected::kNo, kBottomLeft_GrSurfaceOrigin, SkBudgeted::kYes,
                 nullptr)) {
         topLeftRTC->clear(SK_PMColor4fTRANSPARENT);
-        topLeftRTC->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
-        topLeftRTC->priv().testingOnly_addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
+        topLeftRTC->addDrawOp(ClockwiseTestOp::Make(ctx, false, 0));
+        topLeftRTC->addDrawOp(ClockwiseTestOp::Make(ctx, true, 100));
         rtc->drawTexture(nullptr,
                          topLeftRTC->readSurfaceView(),
                          rtc->colorInfo().alphaType(),

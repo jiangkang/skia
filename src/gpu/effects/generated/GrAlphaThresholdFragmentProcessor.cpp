@@ -29,14 +29,14 @@ public:
         (void)innerThreshold;
         auto outerThreshold = _outer.outerThreshold;
         (void)outerThreshold;
-        innerThresholdVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                             kHalf_GrSLType, "innerThreshold");
-        outerThresholdVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                             kHalf_GrSLType, "outerThreshold");
-        SkString _sample515 = this->invokeChild(0, args);
+        innerThresholdVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kHalf_GrSLType, "innerThreshold");
+        outerThresholdVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kHalf_GrSLType, "outerThreshold");
+        SkString _sample0 = this->invokeChild(0, args);
         fragBuilder->codeAppendf(
-                R"SkSL(half4 color = %s;)SkSL", _sample515.c_str());
-        SkString _sample555 = this->invokeChild(1, args);
+                R"SkSL(half4 color = %s;)SkSL", _sample0.c_str());
+        SkString _sample1 = this->invokeChild(1, args);
         fragBuilder->codeAppendf(
                 R"SkSL(
 half4 mask_color = %s;
@@ -51,14 +51,15 @@ if (mask_color.w < 0.5) {
     color.xyz *= scale;
     color.w = %s;
 }
-%s = color;
+return color;
 )SkSL",
-                _sample555.c_str(), args.fUniformHandler->getUniformCStr(outerThresholdVar),
+                _sample1.c_str(),
+                args.fUniformHandler->getUniformCStr(outerThresholdVar),
                 args.fUniformHandler->getUniformCStr(outerThresholdVar),
                 args.fUniformHandler->getUniformCStr(outerThresholdVar),
                 args.fUniformHandler->getUniformCStr(innerThresholdVar),
                 args.fUniformHandler->getUniformCStr(innerThresholdVar),
-                args.fUniformHandler->getUniformCStr(innerThresholdVar), args.fOutputColor);
+                args.fUniformHandler->getUniformCStr(innerThresholdVar));
     }
 
 private:
@@ -74,8 +75,9 @@ private:
     UniformHandle innerThresholdVar;
     UniformHandle outerThresholdVar;
 };
-GrGLSLFragmentProcessor* GrAlphaThresholdFragmentProcessor::onCreateGLSLInstance() const {
-    return new GrGLSLAlphaThresholdFragmentProcessor();
+std::unique_ptr<GrGLSLFragmentProcessor> GrAlphaThresholdFragmentProcessor::onMakeProgramImpl()
+        const {
+    return std::make_unique<GrGLSLAlphaThresholdFragmentProcessor>();
 }
 void GrAlphaThresholdFragmentProcessor::onGetGLSLProcessorKey(const GrShaderCaps& caps,
                                                               GrProcessorKeyBuilder* b) const {}
@@ -86,7 +88,6 @@ bool GrAlphaThresholdFragmentProcessor::onIsEqual(const GrFragmentProcessor& oth
     if (outerThreshold != that.outerThreshold) return false;
     return true;
 }
-bool GrAlphaThresholdFragmentProcessor::usesExplicitReturn() const { return false; }
 GrAlphaThresholdFragmentProcessor::GrAlphaThresholdFragmentProcessor(
         const GrAlphaThresholdFragmentProcessor& src)
         : INHERITED(kGrAlphaThresholdFragmentProcessor_ClassID, src.optimizationFlags())
@@ -115,7 +116,7 @@ std::unique_ptr<GrFragmentProcessor> GrAlphaThresholdFragmentProcessor::TestCrea
     }
     maskChild = GrProcessorUnitTest::MakeChildFP(testData);
 
-    return GrAlphaThresholdFragmentProcessor::Make(std::move(inputChild), std::move(maskChild),
-                                                   innerThresh, outerThresh);
+    return GrAlphaThresholdFragmentProcessor::Make(
+            std::move(inputChild), std::move(maskChild), innerThresh, outerThresh);
 }
 #endif

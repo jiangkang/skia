@@ -10,13 +10,12 @@
 #include "include/gpu/mock/GrMockTypes.h"
 #include "src/core/SkRectPriv.h"
 #include "src/gpu/GrClip.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrMemoryPool.h"
 #include "src/gpu/GrOnFlushResourceProvider.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
-#include "src/gpu/GrRenderTargetContextPriv.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/GrSurfaceProxy.h"
 #include "src/gpu/GrSurfaceProxyPriv.h"
 #include "src/gpu/GrTexture.h"
@@ -40,12 +39,12 @@ public:
         REPORTER_ASSERT(fReporter, fHasClipTexture);
     }
 
-    void preFlush(GrOnFlushResourceProvider*, const uint32_t*, int) override {
+    void preFlush(GrOnFlushResourceProvider*, SkSpan<const uint32_t>) override {
         REPORTER_ASSERT(fReporter, !fHasOpTexture);
         REPORTER_ASSERT(fReporter, !fHasClipTexture);
     }
 
-    void postFlush(GrDeferredUploadToken, const uint32_t* opsTaskIDs, int numOpsTaskIDs) override {
+    void postFlush(GrDeferredUploadToken, SkSpan<const uint32_t>) override {
         REPORTER_ASSERT(fReporter, fHasOpTexture);
         REPORTER_ASSERT(fReporter, fHasClipTexture);
     }
@@ -54,13 +53,11 @@ public:
     public:
         DEFINE_OP_CLASS_ID
 
-        static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                              GrProxyProvider* proxyProvider,
-                                              LazyProxyTest* test,
-                                              bool nullTexture) {
-            GrOpMemoryPool* pool = context->priv().opMemoryPool();
-
-            return pool->allocate<Op>(context, proxyProvider, test, nullTexture);
+        static GrOp::Owner Make(GrRecordingContext* context,
+                                GrProxyProvider* proxyProvider,
+                                LazyProxyTest* test,
+                                bool nullTexture) {
+            return GrOp::Make<Op>(context, context, proxyProvider, test, nullTexture);
         }
 
         void visitProxies(const VisitProxyFunc& func) const override {
@@ -73,7 +70,7 @@ public:
         }
 
     private:
-        friend class GrOpMemoryPool; // for ctor
+        friend class GrOp; // for ctor
 
         Op(GrRecordingContext* ctx, GrProxyProvider* proxyProvider,
            LazyProxyTest* test, bool nullTexture)
@@ -112,10 +109,11 @@ public:
             return GrProcessorSet::EmptySetAnalysis();
         }
         void onPrePrepare(GrRecordingContext*,
-                          const GrSurfaceProxyView* writeView,
+                          const GrSurfaceProxyView& writeView,
                           GrAppliedClip*,
                           const GrXferProcessor::DstProxyView&,
-                          GrXferBarrierFlags renderPassXferBarriers) override {}
+                          GrXferBarrierFlags renderPassXferBarriers,
+                          GrLoadOp colorLoadOp) override {}
 
         void onPrepare(GrOpFlushState*) override {}
 
@@ -157,7 +155,9 @@ public:
         std::unique_ptr<GrFragmentProcessor> clone() const override {
             return std::make_unique<ClipFP>(fContext, fProxyProvider, fTest, fAtlas);
         }
-        GrGLSLFragmentProcessor* onCreateGLSLInstance() const override { return nullptr; }
+        std::unique_ptr<GrGLSLFragmentProcessor> onMakeProgramImpl() const override {
+            return nullptr;
+        }
         void onGetGLSLProcessorKey(const GrShaderCaps&, GrProcessorKeyBuilder*) const override {}
         bool onIsEqual(const GrFragmentProcessor&) const override { return false; }
 
@@ -179,7 +179,7 @@ public:
         SkIRect getConservativeBounds() const final {
             return SkIRect::MakeSize(fAtlas->dimensions());
         }
-        Effect apply(GrRecordingContext* context, GrRenderTargetContext*, GrAAType,
+        Effect apply(GrRecordingContext* context, GrSurfaceDrawContext*, GrAAType,
                          bool hasUserStencilSettings, GrAppliedClip* out,
                          SkRect* bounds) const override {
             GrProxyProvider* proxyProvider = context->priv().proxyProvider();
@@ -207,15 +207,15 @@ DEF_GPUTEST(LazyProxyTest, reporter, /* options */) {
     for (bool nullTexture : {false, true}) {
         LazyProxyTest test(reporter);
         ctx->priv().addOnFlushCallbackObject(&test);
-        auto rtc = GrRenderTargetContext::Make(
+        auto rtc = GrSurfaceDrawContext::Make(
                 ctx.get(), GrColorType::kRGBA_8888, nullptr, SkBackingFit::kExact, {100, 100});
         REPORTER_ASSERT(reporter, rtc);
-        auto mockAtlas = GrRenderTargetContext::Make(
+        auto mockAtlas = GrSurfaceDrawContext::Make(
                 ctx.get(), GrColorType::kAlpha_F16, nullptr, SkBackingFit::kExact, {10, 10});
         REPORTER_ASSERT(reporter, mockAtlas);
         LazyProxyTest::Clip clip(&test, mockAtlas->asTextureProxy());
-        rtc->priv().testingOnly_addDrawOp(
-                &clip, LazyProxyTest::Op::Make(ctx.get(), proxyProvider, &test, nullTexture));
+        rtc->addDrawOp(&clip,
+                       LazyProxyTest::Op::Make(ctx.get(), proxyProvider, &test, nullTexture));
         ctx->priv().testingOnly_flushAndRemoveOnFlushCallbackObject(&test);
     }
 }
@@ -304,16 +304,15 @@ class LazyFailedInstantiationTestOp : public GrDrawOp {
 public:
     DEFINE_OP_CLASS_ID
 
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* rContext,
-                                          GrProxyProvider* proxyProvider,
-                                          int* testExecuteValue,
-                                          bool shouldFailInstantiation) {
-        GrOpMemoryPool* pool = rContext->priv().opMemoryPool();
-
-        return pool->allocate<LazyFailedInstantiationTestOp>(rContext->priv().caps(),
-                                                             proxyProvider,
-                                                             testExecuteValue,
-                                                             shouldFailInstantiation);
+    static GrOp::Owner Make(GrRecordingContext* rContext,
+                            GrProxyProvider* proxyProvider,
+                            int* testExecuteValue,
+                            bool shouldFailInstantiation) {
+        return GrOp::Make<LazyFailedInstantiationTestOp>(rContext,
+                                                         rContext->priv().caps(),
+                                                         proxyProvider,
+                                                         testExecuteValue,
+                                                         shouldFailInstantiation);
     }
 
     void visitProxies(const VisitProxyFunc& func) const override {
@@ -321,7 +320,7 @@ public:
     }
 
 private:
-    friend class GrOpMemoryPool; // for ctor
+    friend class GrOp; // for ctor
 
     LazyFailedInstantiationTestOp(const GrCaps* caps, GrProxyProvider* proxyProvider,
                                   int* testExecuteValue, bool shouldFailInstantiation)
@@ -360,10 +359,11 @@ private:
         return GrProcessorSet::EmptySetAnalysis();
     }
     void onPrePrepare(GrRecordingContext*,
-                      const GrSurfaceProxyView* writeView,
+                      const GrSurfaceProxyView& writeView,
                       GrAppliedClip*,
                       const GrXferProcessor::DstProxyView&,
-                      GrXferBarrierFlags renderPassXferBarriers) override {}
+                      GrXferBarrierFlags renderPassXferBarriers,
+                      GrLoadOp colorLoadOp) override {}
     void onPrepare(GrOpFlushState*) override {}
     void onExecute(GrOpFlushState* state, const SkRect& chainBounds) override {
         *fTestExecuteValue = 2;
@@ -382,15 +382,15 @@ DEF_GPUTEST(LazyProxyFailedInstantiationTest, reporter, /* options */) {
     sk_sp<GrDirectContext> ctx = GrDirectContext::MakeMock(&mockOptions, GrContextOptions());
     GrProxyProvider* proxyProvider = ctx->priv().proxyProvider();
     for (bool failInstantiation : {false, true}) {
-        auto rtc = GrRenderTargetContext::Make(
+        auto rtc = GrSurfaceDrawContext::Make(
                 ctx.get(), GrColorType::kRGBA_8888, nullptr, SkBackingFit::kExact, {100, 100});
         REPORTER_ASSERT(reporter, rtc);
 
         rtc->clear(SkPMColor4f::FromBytes_RGBA(0xbaaaaaad));
 
         int executeTestValue = 0;
-        rtc->priv().testingOnly_addDrawOp(LazyFailedInstantiationTestOp::Make(
-                ctx.get(), proxyProvider, &executeTestValue, failInstantiation));
+        rtc->addDrawOp(LazyFailedInstantiationTestOp::Make(ctx.get(), proxyProvider,
+                                                           &executeTestValue, failInstantiation));
         ctx->flushAndSubmit();
 
         if (failInstantiation) {

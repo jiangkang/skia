@@ -26,12 +26,12 @@ public:
         (void)_outer;
         auto color = _outer.color;
         (void)color;
-        colorVar = args.fUniformHandler->addUniform(&_outer, kFragment_GrShaderFlag,
-                                                    kHalf4_GrSLType, "color");
+        colorVar = args.fUniformHandler->addUniform(
+                &_outer, kFragment_GrShaderFlag, kHalf4_GrSLType, "color");
         fragBuilder->codeAppendf(
-                R"SkSL(%s = %s;
+                R"SkSL(return %s;
 )SkSL",
-                args.fOutputColor, args.fUniformHandler->getUniformCStr(colorVar));
+                args.fUniformHandler->getUniformCStr(colorVar));
     }
 
 private:
@@ -49,8 +49,8 @@ private:
     SkPMColor4f colorPrev = {SK_FloatNaN, SK_FloatNaN, SK_FloatNaN, SK_FloatNaN};
     UniformHandle colorVar;
 };
-GrGLSLFragmentProcessor* GrConstColorProcessor::onCreateGLSLInstance() const {
-    return new GrGLSLConstColorProcessor();
+std::unique_ptr<GrGLSLFragmentProcessor> GrConstColorProcessor::onMakeProgramImpl() const {
+    return std::make_unique<GrGLSLConstColorProcessor>();
 }
 void GrConstColorProcessor::onGetGLSLProcessorKey(const GrShaderCaps& caps,
                                                   GrProcessorKeyBuilder* b) const {}
@@ -60,7 +60,6 @@ bool GrConstColorProcessor::onIsEqual(const GrFragmentProcessor& other) const {
     if (color != that.color) return false;
     return true;
 }
-bool GrConstColorProcessor::usesExplicitReturn() const { return false; }
 GrConstColorProcessor::GrConstColorProcessor(const GrConstColorProcessor& src)
         : INHERITED(kGrConstColorProcessor_ClassID, src.optimizationFlags()), color(src.color) {
     this->cloneAndRegisterAllChildProcessors(src);

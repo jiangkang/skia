@@ -11,11 +11,11 @@
 #include "src/gpu/GrPipeline.h"
 #include "src/gpu/GrRenderTarget.h"
 #include "src/gpu/GrTexture.h"
+#include "src/gpu/dawn/GrDawnAttachment.h"
 #include "src/gpu/dawn/GrDawnBuffer.h"
 #include "src/gpu/dawn/GrDawnGpu.h"
 #include "src/gpu/dawn/GrDawnProgramBuilder.h"
 #include "src/gpu/dawn/GrDawnRenderTarget.h"
-#include "src/gpu/dawn/GrDawnStencilAttachment.h"
 #include "src/gpu/dawn/GrDawnTexture.h"
 #include "src/gpu/dawn/GrDawnUtil.h"
 #include "src/sksl/SkSLCompiler.h"
@@ -54,9 +54,12 @@ GrDawnOpsRenderPass::GrDawnOpsRenderPass(GrDawnGpu* gpu, GrRenderTarget* rt, GrS
 
 wgpu::RenderPassEncoder GrDawnOpsRenderPass::beginRenderPass(wgpu::LoadOp colorOp,
                                                              wgpu::LoadOp stencilOp) {
-    auto stencilAttachment =
-            static_cast<GrDawnStencilAttachment*>(fRenderTarget->getStencilAttachment());
-    const float *c = fColorInfo.fClearColor.vec();
+    if (GrTexture* tex = fRenderTarget->asTexture()) {
+        tex->markMipmapsDirty();
+    }
+    auto stencilAttachment = static_cast<GrDawnAttachment*>(fRenderTarget->getStencilAttachment());
+
+    const float* c = fColorInfo.fClearColor.data();
 
     wgpu::RenderPassColorAttachmentDescriptor colorAttachment;
     colorAttachment.attachment = static_cast<GrDawnRenderTarget*>(fRenderTarget)->textureView();
@@ -100,7 +103,7 @@ void GrDawnOpsRenderPass::onClearStencilClip(const GrScissorState& scissor,
     fPassEncoder = beginRenderPass(wgpu::LoadOp::Load, wgpu::LoadOp::Clear);
 }
 
-void GrDawnOpsRenderPass::onClear(const GrScissorState& scissor, const SkPMColor4f& color) {
+void GrDawnOpsRenderPass::onClear(const GrScissorState& scissor, std::array<float, 4> color) {
     SkASSERT(!scissor.enabled());
     fPassEncoder.EndPass();
     fPassEncoder = beginRenderPass(wgpu::LoadOp::Clear, wgpu::LoadOp::Load);
@@ -120,10 +123,10 @@ void GrDawnOpsRenderPass::applyState(GrDawnProgram* program, const GrProgramInfo
     auto bindGroup = program->setUniformData(fGpu, fRenderTarget, programInfo);
     fPassEncoder.SetPipeline(program->fRenderPipeline);
     fPassEncoder.SetBindGroup(0, bindGroup, 0, nullptr);
-    const GrPipeline& pipeline = programInfo.pipeline();
-    if (pipeline.isStencilEnabled()) {
-        fPassEncoder.SetStencilReference(pipeline.getUserStencil()->fCCWFace.fRef);
+    if (programInfo.isStencilEnabled()) {
+        fPassEncoder.SetStencilReference(programInfo.userStencilSettings()->fCCWFace.fRef);
     }
+    const GrPipeline& pipeline = programInfo.pipeline();
     GrXferProcessor::BlendInfo blendInfo = pipeline.getXferProcessor().getBlendInfo();
     const float* c = blendInfo.fBlendConstant.vec();
     wgpu::Color color{c[0], c[1], c[2], c[3]};
@@ -142,12 +145,15 @@ void GrDawnOpsRenderPass::onEnd() {
 bool GrDawnOpsRenderPass::onBindPipeline(const GrProgramInfo& programInfo,
                                          const SkRect& drawBounds) {
     fCurrentProgram = fGpu->getOrCreateRenderPipeline(fRenderTarget, programInfo);
+    if (!fCurrentProgram) {
+        return false;
+    }
     this->applyState(fCurrentProgram.get(), programInfo);
     return true;
 }
 
 void GrDawnOpsRenderPass::onSetScissorRect(const SkIRect& scissor) {
-    // Higher-level GrRenderTargetContext and clips should have already ensured draw bounds are
+    // Higher-level GrSurfaceDrawContext and clips should have already ensured draw bounds are
     // restricted to the render target.
     SkASSERT(SkIRect::MakeSize(fRenderTarget->dimensions()).contains(scissor));
     auto nativeScissorRect =
@@ -180,7 +186,7 @@ void GrDawnOpsRenderPass::onBindBuffers(sk_sp<const GrBuffer> indexBuffer,
     }
     if (indexBuffer) {
         wgpu::Buffer index = static_cast<const GrDawnBuffer*>(indexBuffer.get())->get();
-        fPassEncoder.SetIndexBuffer(index);
+        fPassEncoder.SetIndexBufferWithFormat(index, wgpu::IndexFormat::Uint16);
     }
 }
 

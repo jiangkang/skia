@@ -16,7 +16,6 @@
 #include "src/core/SkNextID.h"
 
 #if SK_SUPPORT_GPU
-#include "include/core/SkYUVAIndex.h"
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/GrRecordingContext.h"
 #include "include/private/GrResourceKey.h"
@@ -30,9 +29,9 @@
 #include "src/gpu/GrPaint.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrRecordingContextPriv.h"
-#include "src/gpu/GrRenderTargetContext.h"
 #include "src/gpu/GrSamplerState.h"
-#include "src/gpu/SkGr.h"
+#include "src/gpu/GrSurfaceFillContext.h"
+#include "src/gpu/GrYUVATextureProxies.h"
 #include "src/gpu/effects/GrYUVtoRGBEffect.h"
 #endif
 
@@ -195,17 +194,6 @@ bool SkImage_Lazy::onIsValid(GrRecordingContext* context) const {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-#if SK_SUPPORT_GPU
-GrSurfaceProxyView SkImage_Lazy::refView(GrRecordingContext* context, GrMipmapped mipMapped) const {
-    if (!context) {
-        return {};
-    }
-
-    GrImageTextureMaker textureMaker(context, this, GrImageTexGenPolicy::kDraw);
-    return textureMaker.view(mipMapped);
-}
-#endif
-
 sk_sp<SkImage> SkImage_Lazy::onMakeSubset(const SkIRect& subset, GrDirectContext* direct) const {
     // TODO: can we do this more efficiently, by telling the generator we want to
     //       "realize" a subset?
@@ -244,7 +232,7 @@ sk_sp<SkImage> SkImage_Lazy::onReinterpretColorSpace(sk_sp<SkColorSpace> newCS) 
         pixmap.setColorSpace(this->refColorSpace());
         if (ScopedGenerator(fSharedGenerator)->getPixels(pixmap)) {
             bitmap.setImmutable();
-            return SkImage::MakeFromBitmap(bitmap);
+            return bitmap.asImage();
         }
     }
     return nullptr;
@@ -259,77 +247,85 @@ sk_sp<SkImage> SkImage::MakeFromGenerator(std::unique_ptr<SkImageGenerator> gene
 
 #if SK_SUPPORT_GPU
 
+std::tuple<GrSurfaceProxyView, GrColorType> SkImage_Lazy::onAsView(
+        GrRecordingContext* context,
+        GrMipmapped mipmapped,
+        GrImageTexGenPolicy policy) const {
+    GrImageTextureMaker textureMaker(context, this, policy);
+    return {textureMaker.view(mipmapped), textureMaker.colorType()};
+}
+
 GrSurfaceProxyView SkImage_Lazy::textureProxyViewFromPlanes(GrRecordingContext* ctx,
                                                             SkBudgeted budgeted) const {
-    SkYUVASizeInfo yuvSizeInfo;
-    SkYUVAIndex yuvaIndices[SkYUVAIndex::kIndexCount];
-    SkYUVColorSpace yuvColorSpace;
-    SkPixmap planes[SkYUVASizeInfo::kMaxCount];
-
     SkYUVAPixmapInfo::SupportedDataTypes supportedDataTypes(*ctx);
-    sk_sp<SkCachedData> dataStorage =
-            this->getPlanes(supportedDataTypes, &yuvSizeInfo, yuvaIndices, &yuvColorSpace, planes);
+    SkYUVAPixmaps yuvaPixmaps;
+    sk_sp<SkCachedData> dataStorage = this->getPlanes(supportedDataTypes, &yuvaPixmaps);
     if (!dataStorage) {
         return {};
     }
 
-    GrSurfaceProxyView yuvViews[SkYUVASizeInfo::kMaxCount];
-    for (int i = 0; i < SkYUVASizeInfo::kMaxCount; ++i) {
-        if (yuvSizeInfo.fSizes[i].isEmpty()) {
-            SkASSERT(!yuvSizeInfo.fWidthBytes[i]);
-            continue;
-        }
-
-        int componentWidth = yuvSizeInfo.fSizes[i].fWidth;
-        int componentHeight = yuvSizeInfo.fSizes[i].fHeight;
+    GrSurfaceProxyView views[SkYUVAInfo::kMaxPlanes];
+    GrColorType pixmapColorTypes[SkYUVAInfo::kMaxPlanes];
+    for (int i = 0; i < yuvaPixmaps.numPlanes(); ++i) {
         // If the sizes of the components are not all the same we choose to create exact-match
         // textures for the smaller ones rather than add a texture domain to the draw.
         // TODO: revisit this decision to improve texture reuse?
-        SkBackingFit fit =
-                (componentWidth  != yuvSizeInfo.fSizes[0].fWidth) ||
-                (componentHeight != yuvSizeInfo.fSizes[0].fHeight)
-                ? SkBackingFit::kExact : SkBackingFit::kApprox;
+        SkBackingFit fit = yuvaPixmaps.plane(i).dimensions() == this->dimensions()
+                                   ? SkBackingFit::kApprox
+                                   : SkBackingFit::kExact;
 
         // We grab a ref to cached yuv data. When the SkBitmap we create below goes away it will
-        // call the YUVGen_DataReleaseProc which will release this ref.
+        // call releaseProc which will release this ref.
         // DDL TODO: Currently we end up creating a lazy proxy that will hold onto a ref to the
         // SkImage in its lambda. This means that we'll keep the ref on the YUV data around for the
         // life time of the proxy and not just upload. For non-DDL draws we should look into
         // releasing this SkImage after uploads (by deleting the lambda after instantiation).
-        dataStorage->ref();
         auto releaseProc = [](void*, void* data) {
-            SkCachedData* cachedData = static_cast<SkCachedData*>(data);
+            auto cachedData = static_cast<SkCachedData*>(data);
             SkASSERT(cachedData);
             cachedData->unref();
         };
         SkBitmap bitmap;
-        bitmap.installPixels(planes[i].info(), planes[i].writable_addr(),
-                             yuvSizeInfo.fWidthBytes[i], releaseProc, dataStorage.get());
+        bitmap.installPixels(yuvaPixmaps.plane(i).info(),
+                             yuvaPixmaps.plane(i).writable_addr(),
+                             yuvaPixmaps.plane(i).rowBytes(),
+                             releaseProc,
+                             SkRef(dataStorage.get()));
         bitmap.setImmutable();
 
         GrBitmapTextureMaker maker(ctx, bitmap, fit);
-        yuvViews[i] = maker.view(GrMipmapped::kNo);
+        views[i] = maker.view(GrMipmapped::kNo);
 
-        if (!yuvViews[i]) {
+        if (!views[i]) {
             return {};
         }
-
-        SkASSERT(yuvViews[i].proxy()->dimensions() == yuvSizeInfo.fSizes[i]);
+        pixmapColorTypes[i] = SkColorTypeToGrColorType(bitmap.colorType());
     }
 
     // TODO: investigate preallocating mip maps here
-    GrColorType ct = SkColorTypeToGrColorType(this->colorType());
-    auto renderTargetContext = GrRenderTargetContext::Make(
-            ctx, ct, nullptr, SkBackingFit::kExact, this->dimensions(), 1, GrMipmapped::kNo,
-            GrProtected::kNo, kTopLeft_GrSurfaceOrigin, budgeted);
-    if (!renderTargetContext) {
+    GrImageInfo info(SkColorTypeToGrColorType(this->colorType()),
+                     kPremul_SkAlphaType,
+                     /*color space*/ nullptr,
+                     this->dimensions());
+    auto surfaceFillContext = GrSurfaceFillContext::Make(ctx,
+                                                         info,
+                                                         SkBackingFit::kExact,
+                                                         1,
+                                                         GrMipmapped::kNo,
+                                                         GrProtected::kNo,
+                                                         kTopLeft_GrSurfaceOrigin,
+                                                         budgeted);
+    if (!surfaceFillContext) {
         return {};
     }
 
-    GrPaint paint;
-    const auto& caps = *ctx->priv().caps();
-    std::unique_ptr<GrFragmentProcessor> yuvToRgbProcessor = GrYUVtoRGBEffect::Make(
-            yuvViews, yuvaIndices, yuvColorSpace, GrSamplerState::Filter::kNearest, caps);
+    GrYUVATextureProxies yuvaProxies(yuvaPixmaps.yuvaInfo(), views, pixmapColorTypes);
+    SkAssertResult(yuvaProxies.isValid());
+
+    std::unique_ptr<GrFragmentProcessor> fp = GrYUVtoRGBEffect::Make(
+            yuvaProxies,
+            GrSamplerState::Filter::kNearest,
+            *ctx->priv().caps());
 
     // The pixels after yuv->rgb will be in the generator's color space.
     // If onMakeColorTypeAndColorSpace has been called then this will not match this image's
@@ -344,97 +340,41 @@ GrSurfaceProxyView SkImage_Lazy::textureProxyViewFromPlanes(GrRecordingContext* 
 
     // If the caller expects the pixels in a different color space than the one from the image,
     // apply a color conversion to do this.
-    std::unique_ptr<GrFragmentProcessor> colorConversionProcessor =
-            GrColorSpaceXformEffect::Make(std::move(yuvToRgbProcessor),
-                                          srcColorSpace, kOpaque_SkAlphaType,
-                                          dstColorSpace, kOpaque_SkAlphaType);
-    paint.setColorFragmentProcessor(std::move(colorConversionProcessor));
+    fp = GrColorSpaceXformEffect::Make(std::move(fp),
+                                       srcColorSpace, kOpaque_SkAlphaType,
+                                       dstColorSpace, kOpaque_SkAlphaType);
+    surfaceFillContext->fillWithFP(std::move(fp));
 
-    paint.setPorterDuffXPFactory(SkBlendMode::kSrc);
-    const SkRect r = SkRect::Make(this->dimensions());
-
-    SkMatrix m = SkEncodedOriginToMatrix(yuvSizeInfo.fOrigin, this->width(), this->height());
-    renderTargetContext->drawRect(nullptr, std::move(paint), GrAA::kNo, m, r);
-
-    SkASSERT(renderTargetContext->asTextureProxy());
-    return renderTargetContext->readSurfaceView();
+    return surfaceFillContext->readSurfaceView();
 }
 
 sk_sp<SkCachedData> SkImage_Lazy::getPlanes(
         const SkYUVAPixmapInfo::SupportedDataTypes& supportedDataTypes,
-        SkYUVASizeInfo* yuvaSizeInfo,
-        SkYUVAIndex yuvaIndices[SkYUVAIndex::kIndexCount],
-        SkYUVColorSpace* yuvColorSpace,
-        SkPixmap planes[SkYUVASizeInfo::kMaxCount]) const {
+        SkYUVAPixmaps* yuvaPixmaps) const {
     ScopedGenerator generator(fSharedGenerator);
 
-    SkYUVPlanesCache::Info yuvInfo;
-    sk_sp<SkCachedData> data(SkYUVPlanesCache::FindAndRef(generator->uniqueID(), &yuvInfo));
+    sk_sp<SkCachedData> data(SkYUVPlanesCache::FindAndRef(generator->uniqueID(), yuvaPixmaps));
 
-    // Try the new more descriptive SkImageGenerator/SkCodec YUVA interface.
-    if (SkYUVAPixmapInfo yuvaPixmapInfo;
-        !data && generator->queryYUVAInfo(supportedDataTypes, &yuvaPixmapInfo) &&
-        yuvaPixmapInfo.yuvaInfo().dimensions() == this->dimensions()) {
-        data.reset(SkResourceCache::NewCachedData(yuvaPixmapInfo.computeTotalBytes()));
-        auto pixmaps = SkYUVAPixmaps::FromExternalMemory(yuvaPixmapInfo, data->writable_data());
-        SkASSERT(pixmaps.isValid());
-        if (generator->getYUVAPlanes(pixmaps) &&
-            pixmaps.toLegacy(&yuvInfo.fSizeInfo, yuvInfo.fYUVAIndices)) {
-            yuvInfo.fColorSpace = yuvaPixmapInfo.yuvColorSpace();
-            std::copy_n(pixmaps.planes().data(), SkYUVAPixmapInfo::kMaxPlanes, yuvInfo.fPlanes);
-            // Decoding is done, cache the resulting YUV planes
-            SkYUVPlanesCache::Add(this->uniqueID(), data.get(), &yuvInfo);
-        } else {
-            data.reset();
-        }
+    if (data) {
+        SkASSERT(yuvaPixmaps->isValid());
+        SkASSERT(yuvaPixmaps->yuvaInfo().dimensions() == this->dimensions());
+        return data;
     }
-
-    // Try the legacy SkImageGenerator/SkCodec YUVA interface.
-    if (!data) {
-        // Fetch yuv plane sizes for memory allocation.
-        if (!generator->queryYUVA8(&yuvInfo.fSizeInfo,
-                                   yuvInfo.fYUVAIndices,
-                                   &yuvInfo.fColorSpace)) {
-            return nullptr;
-        }
-
-        // Allocate the memory for YUVA
-        size_t totalSize(0);
-        for (int i = 0; i < SkYUVASizeInfo::kMaxCount; i++) {
-            SkASSERT((yuvInfo.fSizeInfo.fWidthBytes[i] && yuvInfo.fSizeInfo.fSizes[i].fHeight) ||
-                     (!yuvInfo.fSizeInfo.fWidthBytes[i] && !yuvInfo.fSizeInfo.fSizes[i].fHeight));
-
-            totalSize += yuvInfo.fSizeInfo.fWidthBytes[i] * yuvInfo.fSizeInfo.fSizes[i].fHeight;
-        }
-
-        data.reset(SkResourceCache::NewCachedData(totalSize));
-        char* addr = static_cast<char*>(data->writable_data());
-
-        void* planePtrs[SkYUVASizeInfo::kMaxCount] = {};
-        for (int i = 0; i < SkYUVASizeInfo::kMaxCount; ++i) {
-            if (yuvInfo.fSizeInfo.fWidthBytes[i]) {
-                auto info = SkImageInfo::MakeA8(yuvInfo.fSizeInfo.fSizes[i]);
-                planePtrs[i] = addr;
-                yuvInfo.fPlanes[i].reset(info, addr, yuvInfo.fSizeInfo.fWidthBytes[i]);
-                addr += yuvInfo.fPlanes[i].rowBytes() * yuvInfo.fPlanes[i].height();
-            }
-        }
-        // Get the YUV planes.
-        if (!generator->getYUVA8Planes(yuvInfo.fSizeInfo, yuvInfo.fYUVAIndices, planePtrs)) {
-            return nullptr;
-        }
-        // Decoding is done, cache the resulting YUV planes
-        SkYUVPlanesCache::Add(this->uniqueID(), data.get(), &yuvInfo);
-    }
-
-    if (!data) {
+    SkYUVAPixmapInfo yuvaPixmapInfo;
+    if (!generator->queryYUVAInfo(supportedDataTypes, &yuvaPixmapInfo) ||
+        yuvaPixmapInfo.yuvaInfo().dimensions() != this->dimensions()) {
         return nullptr;
     }
-
-    *yuvaSizeInfo = yuvInfo.fSizeInfo;
-    std::copy_n(yuvInfo.fYUVAIndices, SkYUVAIndex::kIndexCount, yuvaIndices);
-    *yuvColorSpace = yuvInfo.fColorSpace;
-    std::copy_n(yuvInfo.fPlanes, SkYUVASizeInfo::kMaxCount, planes);
+    data.reset(SkResourceCache::NewCachedData(yuvaPixmapInfo.computeTotalBytes()));
+    SkYUVAPixmaps tempPixmaps = SkYUVAPixmaps::FromExternalMemory(yuvaPixmapInfo,
+                                                                  data->writable_data());
+    SkASSERT(tempPixmaps.isValid());
+    if (!generator->getYUVAPlanes(tempPixmaps)) {
+        return nullptr;
+    }
+    // Decoding is done, cache the resulting YUV planes
+    *yuvaPixmaps = tempPixmaps;
+    SkYUVPlanesCache::Add(this->uniqueID(), data.get(), *yuvaPixmaps);
     return data;
 }
 
@@ -485,8 +425,6 @@ GrSurfaceProxyView SkImage_Lazy::lockTextureProxyView(GrRecordingContext* rConte
     if (key.isValid()) {
         auto proxy = proxyProvider->findOrCreateProxyByUniqueKey(key);
         if (proxy) {
-            SK_HISTOGRAM_ENUMERATION("LockTexturePath", kPreExisting_LockTexturePath,
-                                     kLockTexturePathCount);
             GrSwizzle swizzle = caps->getReadSwizzle(proxy->backendFormat(), ct);
             GrSurfaceProxyView view(std::move(proxy), kTopLeft_GrSurfaceOrigin, swizzle);
             if (mipMapped == GrMipmapped::kNo ||
@@ -515,8 +453,6 @@ GrSurfaceProxyView SkImage_Lazy::lockTextureProxyView(GrRecordingContext* rConte
         ScopedGenerator generator(fSharedGenerator);
         if (auto view = generator->generateTexture(rContext, this->imageInfo(), {0,0}, mipMapped,
                                                    texGenPolicy)) {
-            SK_HISTOGRAM_ENUMERATION("LockTexturePath", kNative_LockTexturePath,
-                                     kLockTexturePathCount);
             installKey(view);
             return view;
         }
@@ -532,8 +468,6 @@ GrSurfaceProxyView SkImage_Lazy::lockTextureProxyView(GrRecordingContext* rConte
                                       : SkBudgeted::kYes;
         auto view = this->textureProxyViewFromPlanes(rContext, budgeted);
         if (view) {
-            SK_HISTOGRAM_ENUMERATION("LockTexturePath", kYUV_LockTexturePath,
-                                     kLockTexturePathCount);
             installKey(view);
             return view;
         }
@@ -552,13 +486,10 @@ GrSurfaceProxyView SkImage_Lazy::lockTextureProxyView(GrRecordingContext* rConte
         auto view = bitmapMaker.view(mipMapped);
         if (view) {
             installKey(view);
-            SK_HISTOGRAM_ENUMERATION("LockTexturePath", kRGBA_LockTexturePath,
-                                     kLockTexturePathCount);
             return view;
         }
     }
 
-    SK_HISTOGRAM_ENUMERATION("LockTexturePath", kFailure_LockTexturePath, kLockTexturePathCount);
     return {};
 }
 
@@ -572,7 +503,6 @@ GrColorType SkImage_Lazy::colorTypeOfLockTextureProxy(const GrCaps* caps) const 
 }
 
 void SkImage_Lazy::addUniqueIDListener(sk_sp<SkIDChangeListener> listener) const {
-    bool singleThreaded = this->unique();
-    fUniqueIDListeners.add(std::move(listener), singleThreaded);
+    fUniqueIDListeners.add(std::move(listener));
 }
 #endif

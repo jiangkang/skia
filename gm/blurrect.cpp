@@ -35,6 +35,8 @@
 #include "src/gpu/GrRecordingContextPriv.h"
 #include "tools/timer/TimeUtils.h"
 
+#include <vector>
+
 #define STROKE_WIDTH    SkIntToScalar(10)
 
 typedef void (*Proc)(SkCanvas*, const SkRect&, const SkPaint&);
@@ -230,7 +232,7 @@ DEF_SIMPLE_GM(blurrect_gallery, canvas, 1200, 1024) {
                     canvas->save();
                     canvas->translate((SkScalar)cur_x, (SkScalar)cur_y);
                     canvas->translate(-(bm.width() - r.width())/2, -(bm.height()-r.height())/2);
-                    canvas->drawBitmap(bm, 0.f, 0.f, nullptr);
+                    canvas->drawImage(bm.asImage(), 0.f, 0.f);
                     canvas->restore();
 
                     cur_x += bm.width() + fPadding;
@@ -304,7 +306,7 @@ protected:
                                 break;
                         }
                         auto pad = PadForSigma(sigma);
-                        canvas->drawImage(img, -pad, -pad, &paint);
+                        canvas->drawImage(img, -pad, -pad, SkSamplingOptions(), &paint);
 #if 0  // Uncomment to hairline stroke around blurred rect in red on top of the blur result.
        // The rect is defined at integer coords. We inset by 1/2 pixel so our stroke lies on top
        // of the edge pixels.
@@ -384,7 +386,7 @@ private:
                     *bmp.getAddr8(x, y) = SkToU8(sk_float_round2int(255.f * result));
                 }
             }
-            return SkImage::MakeFromBitmap(bmp);
+            return bmp.asImage();
         };
 
         // Number of times to subsample (in both X and Y). If fRecalcMasksForAnimation is true
@@ -440,13 +442,13 @@ private:
                 for (size_t widthIdx = 0; widthIdx < kNumSizes; ++widthIdx) {
                     const auto& r =  fReferenceMasks[sigmaIdx][heightIdx][widthIdx];
                     const auto& a =     fActualMasks[sigmaIdx][heightIdx][widthIdx];
-                          auto& d = fMaskDifferences[sigmaIdx][heightIdx][widthIdx];
+                    auto& d       = fMaskDifferences[sigmaIdx][heightIdx][widthIdx];
                     // The actual image might not be present if we're on an abandoned GrContext.
                     if (!a) {
                         d.reset();
                         continue;
                     }
-                    SkASSERT(r->width()  == a->width());
+                    SkASSERT(r->width() == a->width());
                     SkASSERT(r->height() == a->height());
                     auto ii = SkImageInfo::Make(r->width(), r->height(),
                                                 kRGBA_8888_SkColorType, kPremul_SkAlphaType);
@@ -468,9 +470,9 @@ private:
                     SkPaint paint;
                     paint.setBlendMode(SkBlendMode::kSrc);
                     paint.setColorFilter(std::move(greenifyCF));
-                    surf->getCanvas()->drawImage(a, 0, 0, &paint);
+                    surf->getCanvas()->drawImage(a, 0, 0, SkSamplingOptions(), &paint);
                     paint.setBlendMode(SkBlendMode::kDifference);
-                    surf->getCanvas()->drawImage(r, 0, 0, &paint);
+                    surf->getCanvas()->drawImage(r, 0, 0, SkSamplingOptions(), &paint);
                     d = surf->makeImageSnapshot();
                 }
             }
@@ -495,15 +497,64 @@ private:
     bool fRecalcMasksForAnimation = false;
 };
 
-// Delete these when C++17.
-constexpr int BlurRectCompareGM::kSizes[];
-constexpr float BlurRectCompareGM::kSigmas[];
-constexpr size_t BlurRectCompareGM::kNumSizes;
-constexpr size_t BlurRectCompareGM::kNumSigmas;
-
 }  // namespace skiagm
 
 //////////////////////////////////////////////////////////////////////////////
 
 DEF_GM(return new BlurRectGM("blurrects", 0xFF);)
 DEF_GM(return new skiagm::BlurRectCompareGM();)
+
+//////////////////////////////////////////////////////////////////////////////
+
+DEF_SIMPLE_GM(blur_matrix_rect, canvas, 650, 685) {
+    static constexpr auto kRect = SkRect::MakeWH(14, 60);
+    static constexpr float kSigmas[] = {0.5f, 1.2f, 2.3f, 3.9f, 7.4f};
+    static constexpr size_t kNumSigmas = SK_ARRAY_COUNT(kSigmas);
+
+    const SkPoint c = {kRect.centerX(), kRect.centerY()};
+
+    std::vector<SkMatrix> matrices;
+
+    matrices.push_back(SkMatrix::RotateDeg(4.f, c));
+
+    matrices.push_back(SkMatrix::RotateDeg(63.f, c));
+
+    matrices.push_back(SkMatrix::RotateDeg(30.f, c));
+    matrices.back().preScale(1.1f, .5f);
+
+    matrices.push_back(SkMatrix::RotateDeg(147.f, c));
+    matrices.back().preScale(3.f, .1f);
+
+    SkMatrix mirror;
+    mirror.setAll(0, 1, 0,
+                  1, 0, 0,
+                  0, 0, 1);
+    matrices.push_back(SkMatrix::Concat(mirror, matrices.back()));
+
+    matrices.push_back(SkMatrix::RotateDeg(197.f, c));
+    matrices.back().preSkew(.3f, -.5f);
+
+    auto bounds = SkRect::MakeEmpty();
+    for (const auto& m : matrices) {
+        SkRect mapped;
+        m.mapRect(&mapped, kRect);
+        bounds.joinNonEmptyArg(mapped.makeSorted());
+    }
+    float blurPad = 2.f*kSigmas[kNumSigmas - 1];
+    bounds.outset(blurPad, blurPad);
+    canvas->translate(-bounds.left(), -bounds.top());
+    for (auto sigma : kSigmas) {
+        SkPaint paint;
+        paint.setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, sigma));
+        canvas->save();
+        for (const auto& m : matrices) {
+            canvas->save();
+            canvas->concat(m);
+            canvas->drawRect(kRect, paint);
+            canvas->restore();
+            canvas->translate(0, bounds.height());
+        }
+        canvas->restore();
+        canvas->translate(bounds.width(), 0);
+    }
+}

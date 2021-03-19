@@ -1,0 +1,5 @@
+sampler a;
+void main() {
+    sampler b = a;
+    a = b;
+}

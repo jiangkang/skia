@@ -8,56 +8,84 @@
 #ifndef SKSL_FUNCTIONDECLARATION
 #define SKSL_FUNCTIONDECLARATION
 
+#include "include/private/SkSLModifiers.h"
+#include "include/private/SkSLSymbol.h"
+#include "include/private/SkTArray.h"
 #include "src/sksl/ir/SkSLExpression.h"
-#include "src/sksl/ir/SkSLModifiers.h"
-#include "src/sksl/ir/SkSLSymbol.h"
 #include "src/sksl/ir/SkSLSymbolTable.h"
 #include "src/sksl/ir/SkSLType.h"
 #include "src/sksl/ir/SkSLVariable.h"
 
-#include <atomic>
-
 namespace SkSL {
 
-struct FunctionDefinition;
+class FunctionDefinition;
 
 /**
  * A function declaration (not a definition -- does not contain a body).
  */
-struct FunctionDeclaration : public Symbol {
+class FunctionDeclaration final : public Symbol {
+public:
     static constexpr Kind kSymbolKind = Kind::kFunctionDeclaration;
 
-    FunctionDeclaration(int offset, Modifiers modifiers, StringFragment name,
-                        std::vector<const Variable*> parameters, const Type& returnType,
+    FunctionDeclaration(int offset, const Modifiers* modifiers, StringFragment name,
+                        std::vector<const Variable*> parameters, const Type* returnType,
                         bool builtin)
-    : INHERITED(offset, kSymbolKind, std::move(name))
+    : INHERITED(offset, kSymbolKind, name, /*type=*/nullptr)
     , fDefinition(nullptr)
-    , fBuiltin(builtin)
     , fModifiers(modifiers)
     , fParameters(std::move(parameters))
-    , fReturnType(returnType) {}
+    , fReturnType(returnType)
+    , fBuiltin(builtin) {}
+
+    const Modifiers& modifiers() const {
+        return *fModifiers;
+    }
+
+    const FunctionDefinition* definition() const {
+        return fDefinition;
+    }
+
+    void setDefinition(const FunctionDefinition* definition) const {
+        fDefinition = definition;
+    }
+
+    const std::vector<const Variable*>& parameters() const {
+        return fParameters;
+    }
+
+    const Type& returnType() const {
+        return *fReturnType;
+    }
+
+    bool isBuiltin() const {
+        return fBuiltin;
+    }
 
     String description() const override {
-        String result = fReturnType.displayName() + " " + fName + "(";
+        String result = this->returnType().displayName() + " " + this->name() + "(";
         String separator;
-        for (auto p : fParameters) {
+        for (auto p : this->parameters()) {
             result += separator;
             separator = ", ";
             result += p->type().displayName();
+            result += " ";
+            result += p->name();
         }
         result += ")";
         return result;
     }
 
     bool matches(const FunctionDeclaration& f) const {
-        if (fName != f.fName) {
+        if (this->name() != f.name()) {
             return false;
         }
-        if (fParameters.size() != f.fParameters.size()) {
+        const std::vector<const Variable*>& parameters = this->parameters();
+        const std::vector<const Variable*>& otherParameters = f.parameters();
+        if (parameters.size() != otherParameters.size()) {
             return false;
         }
-        for (size_t i = 0; i < fParameters.size(); i++) {
-            if (fParameters[i]->type() != f.fParameters[i]->type()) {
+        for (size_t i = 0; i < parameters.size(); i++) {
+            if (parameters[i]->type() != otherParameters[i]->type()) {
                 return false;
             }
         }
@@ -79,48 +107,59 @@ struct FunctionDeclaration : public Symbol {
      * that each argument can actually be coerced to the final parameter type, respecting the
      * narrowing-conversions flag. This is handled in callCost(), or in convertCall() (via coerce).
      */
-    bool determineFinalTypes(const std::vector<std::unique_ptr<Expression>>& arguments,
-                             std::vector<const Type*>* outParameterTypes,
-                             const Type** outReturnType) const {
-        SkASSERT(arguments.size() == fParameters.size());
+    using ParamTypes = SkSTArray<8, const Type*>;
+    bool determineFinalTypes(const ExpressionArray& arguments,
+                             ParamTypes* outParameterTypes, const Type** outReturnType) const {
+        const std::vector<const Variable*>& parameters = this->parameters();
+        SkASSERT(arguments.size() == parameters.size());
+
+        outParameterTypes->reserve_back(arguments.size());
         int genericIndex = -1;
         for (size_t i = 0; i < arguments.size(); i++) {
-            const Type& parameterType = fParameters[i]->type();
-            if (parameterType.typeKind() == Type::TypeKind::kGeneric) {
-                std::vector<const Type*> types = parameterType.coercibleTypes();
-                if (genericIndex == -1) {
-                    for (size_t j = 0; j < types.size(); j++) {
-                        if (arguments[i]->type().canCoerceTo(*types[j], /*allowNarrowing=*/true)) {
-                            genericIndex = j;
-                            break;
-                        }
-                    }
-                    if (genericIndex == -1) {
-                        return false;
+            // Non-generic parameters are final as-is.
+            const Type& parameterType = parameters[i]->type();
+            if (parameterType.typeKind() != Type::TypeKind::kGeneric) {
+                outParameterTypes->push_back(&parameterType);
+                continue;
+            }
+            // We use the first generic parameter we find to lock in the generic index;
+            // e.g. if we find `float3` here, all `$genType`s will be assumed to be `float3`.
+            const std::vector<const Type*>& types = parameterType.coercibleTypes();
+            if (genericIndex == -1) {
+                for (size_t j = 0; j < types.size(); j++) {
+                    if (arguments[i]->type().canCoerceTo(*types[j], /*allowNarrowing=*/true)) {
+                        genericIndex = j;
+                        break;
                     }
                 }
-                outParameterTypes->push_back(types[genericIndex]);
-            } else {
-                outParameterTypes->push_back(&parameterType);
+                if (genericIndex == -1) {
+                    // The passed-in type wasn't a match for ANY of the generic possibilities.
+                    // This function isn't a match at all.
+                    return false;
+                }
             }
+            outParameterTypes->push_back(types[genericIndex]);
         }
-        if (fReturnType.typeKind() == Type::TypeKind::kGeneric) {
+        // Apply the generic index to our return type.
+        const Type& returnType = this->returnType();
+        if (returnType.typeKind() == Type::TypeKind::kGeneric) {
             if (genericIndex == -1) {
+                // We don't support functions with a generic return type and no other generics.
                 return false;
             }
-            *outReturnType = fReturnType.coercibleTypes()[genericIndex];
+            *outReturnType = returnType.coercibleTypes()[genericIndex];
         } else {
-            *outReturnType = &fReturnType;
+            *outReturnType = &returnType;
         }
         return true;
     }
 
-    mutable FunctionDefinition* fDefinition;
+private:
+    mutable const FunctionDefinition* fDefinition;
+    const Modifiers* fModifiers;
+    std::vector<const Variable*> fParameters;
+    const Type* fReturnType;
     bool fBuiltin;
-    Modifiers fModifiers;
-    const std::vector<const Variable*> fParameters;
-    const Type& fReturnType;
-    mutable std::atomic<int> fCallCount = 0;
 
     using INHERITED = Symbol;
 };

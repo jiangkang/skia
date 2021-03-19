@@ -17,7 +17,7 @@
 
 #ifdef SK_DEBUG
 #include "include/gpu/GrDirectContext.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #endif
 
 void GrTexture::markMipmapsDirty() {
@@ -32,9 +32,8 @@ void GrTexture::markMipmapsClean() {
 }
 
 size_t GrTexture::onGpuMemorySize() const {
-    const GrCaps& caps = *this->getGpu()->caps();
-    return GrSurface::ComputeSize(caps, this->backendFormat(), this->dimensions(), 1,
-                                  this->mipmapped());
+    return GrSurface::ComputeSize(this->backendFormat(), this->dimensions(),
+                                  /*colorSamplesPerPixel=*/1, this->mipmapped());
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -50,6 +49,9 @@ GrTexture::GrTexture(GrGpu* gpu,
         fMaxMipmapLevel = 0;
     } else {
         fMaxMipmapLevel = SkMipmap::ComputeLevelCount(this->width(), this->height());
+    }
+    if (textureType == GrTextureType::kExternal) {
+        this->setReadOnly();
     }
 }
 

@@ -211,7 +211,7 @@ private:
         }
     }
 
-    GrGLSLFragmentProcessor* onCreateGLSLInstance() const override;
+    std::unique_ptr<GrGLSLFragmentProcessor> onMakeProgramImpl() const override;
 
     SkBlendMode fMode;
     BlendBehavior fBlendBehavior;
@@ -260,8 +260,8 @@ std::unique_ptr<GrFragmentProcessor> BlendFragmentProcessor::clone() const {
     return std::unique_ptr<GrFragmentProcessor>(new BlendFragmentProcessor(*this));
 }
 
-GrGLSLFragmentProcessor* BlendFragmentProcessor::onCreateGLSLInstance() const{
-    return new GLBlendFragmentProcessor;
+std::unique_ptr<GrGLSLFragmentProcessor> BlendFragmentProcessor::onMakeProgramImpl() const {
+    return std::make_unique<GLBlendFragmentProcessor>();
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -309,13 +309,15 @@ void GLBlendFragmentProcessor::emitCode(EmitArgs& args) {
     }
 
     // Blend src and dst colors together.
-    GrGLSLBlend::AppendMode(fragBuilder, srcColor.c_str(), dstColor.c_str(),
-                            args.fOutputColor, mode);
+    fragBuilder->codeAppendf("return %s(%s, %s)", GrGLSLBlend::BlendFuncName(mode),
+                             srcColor.c_str(), dstColor.c_str());
 
     // Reapply alpha from input color if we are doing a compose-two.
     if (behavior == BlendBehavior::kComposeTwoBehavior) {
-        fragBuilder->codeAppendf("%s *= %s.a;\n", args.fOutputColor, args.fInputColor);
+        fragBuilder->codeAppendf(" * %s.a", args.fInputColor);
     }
+
+    fragBuilder->codeAppendf(";\n");
 }
 
 //////////////////////////////////////////////////////////////////////////////

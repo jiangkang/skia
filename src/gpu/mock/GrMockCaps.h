@@ -22,6 +22,7 @@ public:
         fMapBufferFlags = options.fMapBufferFlags;
         fBufferMapThreshold = SK_MaxS32; // Overridable in GrContextOptions.
         fMaxTextureSize = options.fMaxTextureSize;
+        fMaxWindowRectangles = options.fMaxWindowRectangles;
         fMaxRenderTargetSize = std::min(options.fMaxRenderTargetSize, fMaxTextureSize);
         fMaxPreferredRenderTargetSize = fMaxRenderTargetSize;
         fMaxVertexAttributes = options.fMaxVertexAttributes;
@@ -128,15 +129,6 @@ public:
         return this->maxRenderTargetSampleCount(format.asMockColorType());
     }
 
-    size_t bytesPerPixel(const GrBackendFormat& format) const override {
-        SkImage::CompressionType compression = format.asMockCompressionType();
-        if (compression != SkImage::CompressionType::kNone) {
-            return 0;
-        }
-
-        return GrColorTypeBytesPerPixel(format.asMockColorType());
-    }
-
     SupportedWrite supportedWritePixelsColorType(GrColorType surfaceColorType,
                                                  const GrBackendFormat& surfaceFormat,
                                                  GrColorType srcColorType) const override {
@@ -158,7 +150,9 @@ public:
 
     uint64_t computeFormatKey(const GrBackendFormat&) const override;
 
-    GrProgramDesc makeDesc(GrRenderTarget*, const GrProgramInfo&) const override;
+    GrProgramDesc makeDesc(GrRenderTarget*,
+                           const GrProgramInfo&,
+                           ProgramDescOverrideFlags) const override;
 
 #if GR_TEST_UTILS
     std::vector<GrCaps::TestFormatColorTypeCombination> getTestingCombinations() const override;

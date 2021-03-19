@@ -63,11 +63,15 @@ using U8  = V<uint8_t>;
     #pragma clang diagnostic ignored "-Wvector-conversion"
 #endif
 
-// GCC warns us about returning U64 on x86 because it's larger than a register.
+// GCC & Clang warn us about returning U64 on x86 because it's larger than a register.
 // You'd see warnings like, "using AVX even though AVX is not enabled".
 // We stifle these warnings... our helpers that return U64 are always inlined.
-#if defined(__SSE__) && defined(__GNUC__) && !defined(__clang__)
-    #pragma GCC diagnostic ignored "-Wpsabi"
+#if defined(__SSE__)
+    #if defined(__clang__) && !defined(_MSC_VER)
+        #pragma clang diagnostic ignored "-Wpsabi"
+    #elif defined(__GNUC__)
+        #pragma GCC diagnostic ignored "-Wpsabi"
+    #endif
 #endif
 
 #if defined(__clang__)
@@ -352,7 +356,8 @@ SI F apply_hlg(const skcms_TransferFunction* tf, F x) {
     return x;
 #else
     const float R = tf->a, G = tf->b,
-                a = tf->c, b = tf->d, c = tf->e;
+                a = tf->c, b = tf->d, c = tf->e,
+                K = tf->f + 1;
     U32 bits = bit_pun<U32>(x),
         sign = bits & 0x80000000;
     x = bit_pun<F>(bits ^ sign);
@@ -360,7 +365,7 @@ SI F apply_hlg(const skcms_TransferFunction* tf, F x) {
     F v = if_then_else(x*R <= 1, approx_pow(x*R, G)
                                , approx_exp((x-c)*a) + b);
 
-    return bit_pun<F>(sign | bit_pun<U32>(v));
+    return K*bit_pun<F>(sign | bit_pun<U32>(v));
 #endif
 }
 
@@ -371,10 +376,12 @@ SI F apply_hlginv(const skcms_TransferFunction* tf, F x) {
     return x;
 #else
     const float R = tf->a, G = tf->b,
-                a = tf->c, b = tf->d, c = tf->e;
+                a = tf->c, b = tf->d, c = tf->e,
+                K = tf->f + 1;
     U32 bits = bit_pun<U32>(x),
         sign = bits & 0x80000000;
     x = bit_pun<F>(bits ^ sign);
+    x /= K;
 
     F v = if_then_else(x <= 1, R * approx_pow(x, G)
                              , a * approx_log(x - b) + c);

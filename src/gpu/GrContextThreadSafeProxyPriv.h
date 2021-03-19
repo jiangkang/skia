@@ -21,9 +21,7 @@
  */
 class GrContextThreadSafeProxyPriv {
 public:
-    void init(sk_sp<const GrCaps> caps) const {
-        fProxy->init(std::move(caps));
-    }
+    void init(sk_sp<const GrCaps>, sk_sp<GrThreadSafePipelineBuilder>) const;
 
     bool matches(GrContext_Base* candidate) const {
         return fProxy == candidate->threadSafeProxy().get();
@@ -39,12 +37,8 @@ public:
     GrTextBlobCache* getTextBlobCache() { return fProxy->fTextBlobCache.get(); }
     const GrTextBlobCache* getTextBlobCache() const { return fProxy->fTextBlobCache.get(); }
 
-    GrThreadSafeUniquelyKeyedProxyViewCache* threadSafeViewCache() {
-        return fProxy->fThreadSafeViewCache.get();
-    }
-    const GrThreadSafeUniquelyKeyedProxyViewCache* threadSafeViewCache() const {
-        return fProxy->fThreadSafeViewCache.get();
-    }
+    GrThreadSafeCache* threadSafeCache() { return fProxy->fThreadSafeCache.get(); }
+    const GrThreadSafeCache* threadSafeCache() const { return fProxy->fThreadSafeCache.get(); }
 
     void abandonContext() { fProxy->abandonContext(); }
     bool abandoned() const { return fProxy->abandoned(); }

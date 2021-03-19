@@ -20,9 +20,9 @@
 #include "src/gpu/GrOpFlushState.h"
 #include "src/gpu/GrProcessor.h"
 #include "src/gpu/GrProgramInfo.h"
-#include "src/gpu/GrRenderTargetContext.h"
 #include "src/gpu/GrResourceProvider.h"
 #include "src/gpu/GrStyle.h"
+#include "src/gpu/GrSurfaceDrawContext.h"
 #include "src/gpu/effects/GrBezierEffect.h"
 #include "src/gpu/geometry/GrPathUtils.h"
 #include "src/gpu/geometry/GrStyledShape.h"
@@ -556,16 +556,17 @@ static void bloat_quad(const SkPoint qpts[3], const SkMatrix* toDevice,
     SkVector cb = b;
     cb -= c;
 
-    // After the transform we might have a line, try to do something reasonable
-    if (toDevice && SkPointPriv::LengthSqd(ab) <= SK_ScalarNearlyZero*SK_ScalarNearlyZero) {
+    // After the transform (or due to floating point math) we might have a line,
+    // try to do something reasonable
+    if (SkPointPriv::LengthSqd(ab) <= SK_ScalarNearlyZero*SK_ScalarNearlyZero) {
         ab = cb;
     }
-    if (toDevice && SkPointPriv::LengthSqd(cb) <= SK_ScalarNearlyZero*SK_ScalarNearlyZero) {
+    if (SkPointPriv::LengthSqd(cb) <= SK_ScalarNearlyZero*SK_ScalarNearlyZero) {
         cb = ab;
     }
 
     // We should have already handled degenerates
-    SkASSERT(toDevice || (ab.length() > 0 && cb.length() > 0));
+    SkASSERT(ab.length() > 0 && cb.length() > 0);
 
     ab.normalize();
     SkVector abN = SkPointPriv::MakeOrthog(ab, SkPointPriv::kLeft_Side);
@@ -800,13 +801,13 @@ private:
 public:
     DEFINE_OP_CLASS_ID
 
-    static std::unique_ptr<GrDrawOp> Make(GrRecordingContext* context,
-                                          GrPaint&& paint,
-                                          const SkMatrix& viewMatrix,
-                                          const SkPath& path,
-                                          const GrStyle& style,
-                                          const SkIRect& devClipBounds,
-                                          const GrUserStencilSettings* stencilSettings) {
+    static GrOp::Owner Make(GrRecordingContext* context,
+                            GrPaint&& paint,
+                            const SkMatrix& viewMatrix,
+                            const SkPath& path,
+                            const GrStyle& style,
+                            const SkIRect& devClipBounds,
+                            const GrUserStencilSettings* stencilSettings) {
         SkScalar hairlineCoverage;
         uint8_t newCoverage = 0xff;
         if (GrPathRenderer::IsStrokeHairlineOrEquivalent(style, viewMatrix, &hairlineCoverage)) {
@@ -821,7 +822,7 @@ public:
                                                    devClipBounds, capLength, stencilSettings);
     }
 
-    AAHairlineOp(const Helper::MakeArgs& helperArgs,
+    AAHairlineOp(GrProcessorSet* processorSet,
                  const SkPMColor4f& color,
                  uint8_t coverage,
                  const SkMatrix& viewMatrix,
@@ -830,7 +831,7 @@ public:
                  SkScalar capLength,
                  const GrUserStencilSettings* stencilSettings)
             : INHERITED(ClassID())
-            , fHelper(helperArgs, GrAAType::kCoverage, stencilSettings)
+            , fHelper(processorSet, GrAAType::kCoverage, stencilSettings)
             , fColor(color)
             , fCoverage(coverage) {
         fPaths.emplace_back(PathData{viewMatrix, path, devClipBounds, capLength});
@@ -876,20 +877,23 @@ public:
 
 private:
     void makeLineProgramInfo(const GrCaps&, SkArenaAlloc*, const GrPipeline*,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              const SkMatrix* geometryProcessorViewM,
                              const SkMatrix* geometryProcessorLocalM,
-                             GrXferBarrierFlags renderPassXferBarriers);
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp);
     void makeQuadProgramInfo(const GrCaps&, SkArenaAlloc*, const GrPipeline*,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              const SkMatrix* geometryProcessorViewM,
                              const SkMatrix* geometryProcessorLocalM,
-                             GrXferBarrierFlags renderPassXferBarriers);
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp);
     void makeConicProgramInfo(const GrCaps&, SkArenaAlloc*, const GrPipeline*,
-                              const GrSurfaceProxyView* writeView,
+                              const GrSurfaceProxyView& writeView,
                               const SkMatrix* geometryProcessorViewM,
                               const SkMatrix* geometryProcessorLocalM,
-                              GrXferBarrierFlags renderPassXferBarriers);
+                              GrXferBarrierFlags renderPassXferBarriers,
+                              GrLoadOp colorLoadOp);
 
     GrProgramInfo* programInfo() override {
         // This Op has 3 programInfos and implements its own onPrePrepareDraws so this entry point
@@ -902,16 +906,18 @@ private:
 
     void onCreateProgramInfo(const GrCaps*,
                              SkArenaAlloc*,
-                             const GrSurfaceProxyView* writeView,
+                             const GrSurfaceProxyView& writeView,
                              GrAppliedClip&&,
                              const GrXferProcessor::DstProxyView&,
-                             GrXferBarrierFlags renderPassXferBarriers) override;
+                             GrXferBarrierFlags renderPassXferBarriers,
+                             GrLoadOp colorLoadOp) override;
 
     void onPrePrepareDraws(GrRecordingContext*,
-                           const GrSurfaceProxyView* writeView,
+                           const GrSurfaceProxyView& writeView,
                            GrAppliedClip*,
                            const GrXferProcessor::DstProxyView&,
-                           GrXferBarrierFlags renderPassXferBarriers) override;
+                           GrXferBarrierFlags renderPassXferBarriers,
+                           GrLoadOp colorLoadOp) override;
 
     void onPrepareDraws(Target*) override;
     void onExecute(GrOpFlushState*, const SkRect& chainBounds) override;
@@ -920,8 +926,7 @@ private:
     typedef SkTArray<int, true> IntArray;
     typedef SkTArray<float, true> FloatArray;
 
-    CombineResult onCombineIfPossible(GrOp* t, GrRecordingContext::Arenas*,
-                                      const GrCaps& caps) override {
+    CombineResult onCombineIfPossible(GrOp* t, SkArenaAlloc*, const GrCaps& caps) override {
         AAHairlineOp* that = t->cast<AAHairlineOp>();
 
         if (!fHelper.isCompatible(that->fHelper, caps, this->bounds(), that->bounds())) {
@@ -993,10 +998,11 @@ GR_MAKE_BITFIELD_OPS(AAHairlineOp::Program)
 
 void AAHairlineOp::makeLineProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
                                        const GrPipeline* pipeline,
-                                       const GrSurfaceProxyView* writeView,
+                                       const GrSurfaceProxyView& writeView,
                                        const SkMatrix* geometryProcessorViewM,
                                        const SkMatrix* geometryProcessorLocalM,
-                                       GrXferBarrierFlags renderPassXferBarriers) {
+                                       GrXferBarrierFlags renderPassXferBarriers,
+                                       GrLoadOp colorLoadOp) {
     if (fProgramInfos[0]) {
         return;
     }
@@ -1020,15 +1026,16 @@ void AAHairlineOp::makeLineProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
 
     fProgramInfos[0] = GrSimpleMeshDrawOpHelper::CreateProgramInfo(
             arena, pipeline, writeView, lineGP, GrPrimitiveType::kTriangles,
-            renderPassXferBarriers);
+            renderPassXferBarriers, colorLoadOp, fHelper.stencilSettings());
 }
 
 void AAHairlineOp::makeQuadProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
                                        const GrPipeline* pipeline,
-                                       const GrSurfaceProxyView* writeView,
+                                       const GrSurfaceProxyView& writeView,
                                        const SkMatrix* geometryProcessorViewM,
                                        const SkMatrix* geometryProcessorLocalM,
-                                       GrXferBarrierFlags renderPassXferBarriers) {
+                                       GrXferBarrierFlags renderPassXferBarriers,
+                                       GrLoadOp colorLoadOp) {
     if (fProgramInfos[1]) {
         return;
     }
@@ -1044,15 +1051,16 @@ void AAHairlineOp::makeQuadProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
 
     fProgramInfos[1] = GrSimpleMeshDrawOpHelper::CreateProgramInfo(
             arena, pipeline, writeView, quadGP, GrPrimitiveType::kTriangles,
-            renderPassXferBarriers);
+            renderPassXferBarriers, colorLoadOp, fHelper.stencilSettings());
 }
 
 void AAHairlineOp::makeConicProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
                                         const GrPipeline* pipeline,
-                                        const GrSurfaceProxyView* writeView,
+                                        const GrSurfaceProxyView& writeView,
                                         const SkMatrix* geometryProcessorViewM,
                                         const SkMatrix* geometryProcessorLocalM,
-                                        GrXferBarrierFlags renderPassXferBarriers) {
+                                        GrXferBarrierFlags renderPassXferBarriers,
+                                        GrLoadOp colorLoadOp) {
     if (fProgramInfos[2]) {
         return;
     }
@@ -1068,7 +1076,7 @@ void AAHairlineOp::makeConicProgramInfo(const GrCaps& caps, SkArenaAlloc* arena,
 
     fProgramInfos[2] = GrSimpleMeshDrawOpHelper::CreateProgramInfo(
             arena, pipeline, writeView, conicGP, GrPrimitiveType::kTriangles,
-            renderPassXferBarriers);
+            renderPassXferBarriers, colorLoadOp, fHelper.stencilSettings());
 }
 
 AAHairlineOp::Program AAHairlineOp::predictPrograms(const GrCaps* caps) const {
@@ -1099,10 +1107,11 @@ AAHairlineOp::Program AAHairlineOp::predictPrograms(const GrCaps* caps) const {
 
 void AAHairlineOp::onCreateProgramInfo(const GrCaps* caps,
                                        SkArenaAlloc* arena,
-                                       const GrSurfaceProxyView* writeView,
+                                       const GrSurfaceProxyView& writeView,
                                        GrAppliedClip&& appliedClip,
                                        const GrXferProcessor::DstProxyView& dstProxyView,
-                                       GrXferBarrierFlags renderPassXferBarriers) {
+                                       GrXferBarrierFlags renderPassXferBarriers,
+                                       GrLoadOp colorLoadOp) {
     // Setup the viewmatrix and localmatrix for the GrGeometryProcessor.
     SkMatrix invert;
     if (!this->viewMatrix().invert(&invert)) {
@@ -1118,32 +1127,33 @@ void AAHairlineOp::onCreateProgramInfo(const GrCaps* caps,
         geometryProcessorLocalM = &SkMatrix::I();
     }
 
-    auto pipeline = fHelper.createPipelineWithStencil(caps, arena, writeView->swizzle(),
-                                                      std::move(appliedClip), dstProxyView);
+    auto pipeline = fHelper.createPipeline(caps, arena, writeView.swizzle(),
+                                           std::move(appliedClip), dstProxyView);
 
     if (fCharacterization & kLine_Program) {
         this->makeLineProgramInfo(*caps, arena, pipeline, writeView,
                                   geometryProcessorViewM, geometryProcessorLocalM,
-                                  renderPassXferBarriers);
+                                  renderPassXferBarriers, colorLoadOp);
     }
     if (fCharacterization & kQuad_Program) {
         this->makeQuadProgramInfo(*caps, arena, pipeline, writeView,
                                   geometryProcessorViewM, geometryProcessorLocalM,
-                                  renderPassXferBarriers);
+                                  renderPassXferBarriers, colorLoadOp);
     }
     if (fCharacterization & kConic_Program) {
         this->makeConicProgramInfo(*caps, arena, pipeline, writeView,
                                    geometryProcessorViewM, geometryProcessorLocalM,
-                                   renderPassXferBarriers);
+                                   renderPassXferBarriers, colorLoadOp);
 
     }
 }
 
 void AAHairlineOp::onPrePrepareDraws(GrRecordingContext* context,
-                                     const GrSurfaceProxyView* writeView,
+                                     const GrSurfaceProxyView& writeView,
                                      GrAppliedClip* clip,
                                      const GrXferProcessor::DstProxyView& dstProxyView,
-                                     GrXferBarrierFlags renderPassXferBarriers) {
+                                     GrXferBarrierFlags renderPassXferBarriers,
+                                     GrLoadOp colorLoadOp) {
     SkArenaAlloc* arena = context->priv().recordTimeAllocator();
     const GrCaps* caps = context->priv().caps();
 
@@ -1154,7 +1164,7 @@ void AAHairlineOp::onPrePrepareDraws(GrRecordingContext* context,
     fCharacterization = this->predictPrograms(caps);
 
     this->createProgramInfo(caps, arena, writeView, std::move(appliedClip), dstProxyView,
-                            renderPassXferBarriers);
+                            renderPassXferBarriers, colorLoadOp);
 
     context->priv().recordProgramInfo(fProgramInfos[0]);
     context->priv().recordProgramInfo(fProgramInfos[1]);
@@ -1306,7 +1316,7 @@ bool GrAAHairLinePathRenderer::onDrawPath(const DrawPathArgs& args) {
 
     SkPath path;
     args.fShape->asPath(&path);
-    std::unique_ptr<GrDrawOp> op =
+    GrOp::Owner op =
             AAHairlineOp::Make(args.fContext, std::move(args.fPaint), *args.fViewMatrix, path,
                                args.fShape->style(), *args.fClipConservativeBounds,
                                args.fUserStencilSettings);

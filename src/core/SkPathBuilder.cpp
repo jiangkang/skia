@@ -18,6 +18,11 @@ SkPathBuilder::SkPathBuilder() {
     this->reset();
 }
 
+SkPathBuilder::SkPathBuilder(SkPathFillType ft) {
+    this->reset();
+    fFillType = ft;
+}
+
 SkPathBuilder::SkPathBuilder(const SkPath& src) {
     *this = src;
 }
@@ -768,6 +773,26 @@ SkPathBuilder& SkPathBuilder::offset(SkScalar dx, SkScalar dy) {
     for (auto& p : fPts) {
         p += {dx, dy};
     }
+    return *this;
+}
+
+SkPathBuilder& SkPathBuilder::addPath(const SkPath& src) {
+    SkPath::RawIter iter(src);
+    SkPoint pts[4];
+    SkPath::Verb verb;
+
+    while ((verb = iter.next(pts)) != SkPath::kDone_Verb) {
+        switch (verb) {
+            case SkPath::kMove_Verb:  this->moveTo (pts[0]); break;
+            case SkPath::kLine_Verb:  this->lineTo (pts[1]); break;
+            case SkPath::kQuad_Verb:  this->quadTo (pts[1], pts[2]); break;
+            case SkPath::kCubic_Verb: this->cubicTo(pts[1], pts[2], pts[3]); break;
+            case SkPath::kConic_Verb: this->conicTo(pts[1], pts[2], iter.conicWeight()); break;
+            case SkPath::kClose_Verb: this->close(); break;
+            case SkPath::kDone_Verb: SkUNREACHABLE;
+        }
+    }
+
     return *this;
 }
 

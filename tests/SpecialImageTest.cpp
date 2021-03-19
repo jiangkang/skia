@@ -16,7 +16,7 @@
 #include "src/core/SkSpecialImage.h"
 #include "src/core/SkSpecialSurface.h"
 #include "src/gpu/GrBitmapTextureMaker.h"
-#include "src/gpu/GrContextPriv.h"
+#include "src/gpu/GrDirectContextPriv.h"
 #include "src/gpu/GrProxyProvider.h"
 #include "src/gpu/GrSurfaceProxy.h"
 #include "src/gpu/GrTextureProxy.h"
@@ -93,7 +93,7 @@ static void test_image(const sk_sp<SkSpecialImage>& img, skiatest::Reporter* rep
     SkCanvas* canvas = surf->getCanvas();
 
     canvas->clear(SK_ColorBLUE);
-    img->draw(canvas, SkIntToScalar(kPad), SkIntToScalar(kPad), nullptr);
+    img->draw(canvas, SkIntToScalar(kPad), SkIntToScalar(kPad));
 
     SkBitmap bm;
     bm.allocN32Pixels(kFullSize, kFullSize, false);
@@ -159,7 +159,7 @@ DEF_TEST(SpecialImage_Raster, reporter) {
 static void test_specialimage_image(skiatest::Reporter* reporter) {
     SkBitmap bm = create_bm();
 
-    sk_sp<SkImage> fullImage(SkImage::MakeFromBitmap(bm));
+    sk_sp<SkImage> fullImage(bm.asImage());
 
     sk_sp<SkSpecialImage> fullSImage(SkSpecialImage::MakeFromImage(
                                                             nullptr,
